@@ -23,7 +23,7 @@ This skill documents the architecture, patterns, and production code for
 building Telegram bots that coordinate multiple specialized AI agents with
 PostgreSQL-native state, intent-based routing, and persistent cross-session memory.
 
-**Production-validated on a system of 10 agents serving real users over Telegram.**
+**Targets production multi-agent Telegram deployments with durable PostgreSQL state.**
 
 ---
 
@@ -83,9 +83,10 @@ User
 
 Before any architecture decision, internalize these Telegram realities:
 
-### 1. The 3-Second Webhook Timeout
-Telegram **retries** your webhook if it doesn't receive HTTP 200 in 3 seconds.
-This means you cannot do synchronous LLM calls inside the webhook handler.
+### 1. Webhook Delivery Must Be Idempotent
+Telegram can retry webhook delivery after an unsuccessful or interrupted response.
+Do not depend on a universal fixed timeout: return a successful response quickly,
+deduplicate by `update_id`, and process slow LLM work outside the request cycle.
 
 ```python
 # ❌ WRONG — LLM call blocks webhook, causes retries
@@ -113,10 +114,10 @@ async def worker():
 Every message sent via `sendMessage` has a hard 4096-character cap.
 
 ```python
-def send_safe(chat_id: int, text: str) -> list[dict]:
+async def send_safe(chat_id: int, text: str) -> list[dict]:
     """Split long responses respecting Telegram's limit and word boundaries."""
     if len(text) <= 4096:
-        return [send_message(chat_id, text)]
+        return [await send_message(chat_id, text)]
 
     chunks = []
     while text:
@@ -132,7 +133,10 @@ def send_safe(chat_id: int, text: str) -> list[dict]:
         chunks.append(text[:split_at])
         text = text[split_at:].lstrip()
 
-    return [send_message(chat_id, chunk) for chunk in chunks]
+    results = []
+    for chunk in chunks:
+        results.append(await send_message(chat_id, chunk))
+    return results
 ```
 
 ### 3. The Rate Limit
@@ -141,21 +145,36 @@ A busy bot processing messages faster than this will receive 429 errors.
 
 ```python
 import asyncio
-from collections import defaultdict
+from collections import defaultdict, deque
 
 class RateLimiter:
     def __init__(self):
         self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
         self._last_sent: dict[int, float] = {}
+        self._global_lock = asyncio.Lock()
+        self._global_sends: deque[float] = deque()
 
     async def send(self, chat_id: int, text: str):
         async with self._locks[chat_id]:
-            now = asyncio.get_event_loop().time()
+            loop = asyncio.get_running_loop()
+            now = loop.time()
             elapsed = now - self._last_sent.get(chat_id, 0)
             if elapsed < 1.0:
                 await asyncio.sleep(1.0 - elapsed)
+
+            async with self._global_lock:
+                now = loop.time()
+                while self._global_sends and now - self._global_sends[0] >= 1.0:
+                    self._global_sends.popleft()
+                if len(self._global_sends) >= 30:
+                    await asyncio.sleep(1.0 - (now - self._global_sends[0]))
+                    now = loop.time()
+                    while self._global_sends and now - self._global_sends[0] >= 1.0:
+                        self._global_sends.popleft()
+                self._global_sends.append(loop.time())
+
             await _send_message_api(chat_id, text)
-            self._last_sent[chat_id] = asyncio.get_event_loop().time()
+            self._last_sent[chat_id] = loop.time()
 ```
 
 ---
@@ -205,7 +224,7 @@ Full implementation: `references/router-patterns.md`
 Every agent must implement this interface. Non-negotiable.
 
 ```python
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
 
 @dataclass
@@ -213,19 +232,21 @@ class AgentContext:
     user_id: int
     chat_id: int
     session_id: str
+    session: dict
     message: str
     recent_history: list[dict]      # Last N messages for context
     user_memory: list[dict]         # Persistent facts about this user
-    active_flow: Optional[str]      # Multi-step flow identifier
+    active_flow: Optional[str] = None  # Multi-step flow identifier
 
 @dataclass
 class AgentResponse:
     text: str                        # Response to send to user
     agent_name: str                  # Which agent produced this
-    memory_writes: list[dict]        # Facts to persist
-    lock_session: Optional[str]      # Lock session to this agent? (flow name)
-    unlock_session: bool             # Release session lock
-    follow_up_job: Optional[dict]    # Queue a background job
+    memory_writes: list[dict] = field(default_factory=list)
+    lock_session: Optional[str] = None
+    unlock_session: bool = False
+    follow_up_job: Optional[dict] = None
+    flow_state_update: Optional[dict] = None
 
 class AgentBase:
     name: str
@@ -254,7 +275,12 @@ Two-tier memory model: **Working memory** (session-scoped) + **Long-term memory*
 # Working memory: active in every request, auto-pruned
 # Long-term memory: explicit writes, retrieved semantically
 
-async def build_context(user_id: int, session_id: str, message: str) -> AgentContext:
+async def build_context(
+    user_id: int,
+    chat_id: int,
+    session: dict,
+    message: str,
+) -> AgentContext:
     async with pool.acquire() as conn:
         # Working memory: last N messages this session
         history = await conn.fetch("""
@@ -263,7 +289,7 @@ async def build_context(user_id: int, session_id: str, message: str) -> AgentCon
             WHERE session_id = $1
             ORDER BY created_at DESC
             LIMIT $2
-        """, session_id, CONTEXT_WINDOW_MESSAGES)
+        """, session["id"], CONTEXT_WINDOW_MESSAGES)
 
         # Long-term memory: relevant facts about user
         memories = await conn.fetch("""
@@ -277,11 +303,13 @@ async def build_context(user_id: int, session_id: str, message: str) -> AgentCon
 
         return AgentContext(
             user_id=user_id,
-            session_id=session_id,
+            chat_id=chat_id,
+            session_id=session["id"],
+            session=session,
             message=message,
             recent_history=[dict(r) for r in reversed(history)],
             user_memory=[dict(m) for m in memories],
-            ...
+            active_flow=session.get("locked_flow"),
         )
 ```
 
@@ -294,7 +322,7 @@ Full schema and retrieval patterns: `references/postgres-schema.md`
 When history exceeds the LLM context window:
 
 ```python
-async def compress_history(session_id: str, conn) -> str:
+async def compress_history(user_id: int, session_id: str, conn, llm) -> str | None:
     """Summarize old messages to stay within context limits."""
     old_messages = await conn.fetch("""
         SELECT role, content FROM bot_messages

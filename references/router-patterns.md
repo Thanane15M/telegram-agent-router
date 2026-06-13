@@ -140,13 +140,18 @@ class Router:
 
     async def handle_update(self, update: dict):
         """Main entry point. Called by the job worker."""
-        message = update.get('message') or update.get('callback_query', {}).get('message')
+        callback = update.get('callback_query')
+        message = update.get('message') or (callback or {}).get('message')
         if not message:
             return
 
-        user_id = message['from']['id']
+        actor = (callback or {}).get('from') or message.get('from')
+        if not actor:
+            return
+
+        user_id = actor['id']
         chat_id = message['chat']['id']
-        text = message.get('text') or update.get('callback_query', {}).get('data', '')
+        text = message.get('text') or (callback or {}).get('data', '')
         start_ms = time.monotonic()
 
         async with self.pool.acquire() as conn:
@@ -223,6 +228,11 @@ class Router:
                 WHERE id = $1
             """, session['id'])
 
+        if response.flow_state_update is not None:
+            await conn.execute("""
+                UPDATE bot_sessions SET flow_state = $2 WHERE id = $1
+            """, session['id'], response.flow_state_update)
+
     async def _ask_clarification(self, intent: IntentResult, agents: list) -> str:
         """When confidence is low, ask the user to clarify."""
         agent_list = "\n".join(
@@ -278,17 +288,28 @@ class SessionFSM:
         return 'FREE'
 
     @staticmethod
-    async def transition(conn, session_id: str, event: str, data: dict = None):
+    async def transition(conn, session_id: str, event: str, data: dict | None = None):
         """Apply a state transition."""
-        transitions = {
-            'lock':   "UPDATE bot_sessions SET locked_agent=$2, locked_flow=$3 WHERE id=$1",
-            'unlock': "UPDATE bot_sessions SET locked_agent=NULL, locked_flow=NULL, flow_state='{}' WHERE id=$1",
-            'advance_flow': "UPDATE bot_sessions SET flow_state=$2 WHERE id=$1",
-            'end':    "UPDATE bot_sessions SET ended_at=NOW() WHERE id=$1",
-        }
-        if event in transitions:
-            args = [session_id] + list((data or {}).values())
-            await conn.execute(transitions[event], *args)
+        data = data or {}
+        if event == 'lock':
+            await conn.execute(
+                "UPDATE bot_sessions SET locked_agent=$2, locked_flow=$3 WHERE id=$1",
+                session_id, data['agent'], data.get('flow')
+            )
+        elif event == 'unlock':
+            await conn.execute(
+                "UPDATE bot_sessions SET locked_agent=NULL, locked_flow=NULL, flow_state='{}' WHERE id=$1",
+                session_id
+            )
+        elif event == 'advance_flow':
+            await conn.execute(
+                "UPDATE bot_sessions SET flow_state=$2 WHERE id=$1",
+                session_id, data['flow_state']
+            )
+        elif event == 'end':
+            await conn.execute(
+                "UPDATE bot_sessions SET ended_at=NOW() WHERE id=$1", session_id
+            )
 ```
 
 ---
@@ -304,6 +325,11 @@ class OnboardingFlow:
         state = ctx.session.get('flow_state', {})
         step_index = state.get('step', 0)
 
+        # Persist the answer to the question asked on the previous turn.
+        if step_index > 0:
+            prev_field = self.STEPS[step_index - 1]
+            state[prev_field] = ctx.message
+
         if step_index >= len(self.STEPS):
             # Flow complete
             return AgentResponse(
@@ -317,12 +343,8 @@ class OnboardingFlow:
                 lock_session=None,
             )
 
-        # Save previous answer, ask next question
+        # Ask the next question.
         current_field = self.STEPS[step_index]
-        if step_index > 0:
-            prev_field = self.STEPS[step_index - 1]
-            state[prev_field] = ctx.message
-
         state['step'] = step_index + 1
         questions = {
             'name': "What's your name?",

@@ -9,7 +9,7 @@ Every number here is verified against the official API documentation.
 
 | Constraint | Value | Consequence if violated |
 |---|---|---|
-| Webhook response timeout | **3 seconds** | Telegram retries, duplicate messages |
+| Webhook response | Return a successful response promptly | Failed or interrupted delivery may be retried |
 | Max webhook connections | 100 (default) | Adjust with `setWebhook.max_connections` |
 | Allowed update types | Must be declared | Undeclared types are silently dropped |
 | HTTPS required | Mandatory | HTTP webhooks rejected |

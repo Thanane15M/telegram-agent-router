@@ -2,9 +2,9 @@
 
 # telegram-agent-router
 
-Telegram retries your webhook after 3 seconds without a response.
-Your LLM call takes 5. Double message. Double cost. Incoherent conversation.
-90% of Telegram bot tutorials skip this entirely.
+Webhook delivery can be retried after an unsuccessful or interrupted response.
+Running an LLM call inside the request path therefore risks duplicate work,
+double cost, and incoherent conversation state.
 
 This skill documents the correct architecture: immediate acknowledgment, async processing, PostgreSQL-native state.
 
@@ -12,19 +12,21 @@ This skill documents the correct architecture: immediate acknowledgment, async p
 
 The core pattern is a two-phase handler — respond to Telegram in under 200ms, then process in a background worker. On top of that: a hybrid intent classifier that routes simple commands on a fast local path (no LLM call) and escalates ambiguous input to an LLM only when needed. Session state is a typed finite state machine stored in PostgreSQL, not in memory, which means state survives restarts and scales horizontally without Redis. Cross-session memory uses the same database — no external vector store required. The skill includes the full schema, the rate-limiting patterns (per-user, per-agent, global), and the eight anti-patterns that break production bots.
 
-Validated on a 10-agent production system. Each agent is isolated. Each has its own intent scope. The router classifies, dispatches, and never blocks.
+Designed from production multi-agent patterns. Each agent is isolated, has its
+own intent scope, and receives work through a non-blocking router contract.
 
 ## Who built this
 
-Gaël-Wilfrid Mamou, Thanane Nextactik, Mayotte. Built and validated on a real system serving real users. Not a demo. Not a tutorial project.
+Gaël-Wilfrid Mamou, Thanane Nextactik, Mayotte. The repository focuses on
+implementation patterns and executable examples rather than a hosted demo.
 
 ## Install
 
 ```bash
-claude skill install https://github.com/Thanane15M/telegram-agent-router
+git clone https://github.com/Thanane15M/telegram-agent-router.git
 ```
 
-Or copy `SKILL.md` and `references/` into `.claude/skills/telegram-agent-router/`.
+Copy `SKILL.md` and `references/` into your agent's local skills directory.
 
 ## License
 

@@ -74,7 +74,7 @@ CREATE TABLE bot_messages (
 
 CREATE INDEX idx_messages_session    ON bot_messages (session_id, created_at DESC);
 CREATE INDEX idx_messages_user       ON bot_messages (user_id, created_at DESC);
-CREATE INDEX idx_messages_telegram   ON bot_messages (telegram_msg_id)
+CREATE UNIQUE INDEX idx_messages_telegram ON bot_messages (chat_id, telegram_msg_id)
   WHERE telegram_msg_id IS NOT NULL;
 
 -- ─────────────────────────────────────────────
@@ -97,8 +97,8 @@ CREATE TABLE bot_memory (
   UNIQUE (user_id, key)
 );
 
-CREATE INDEX idx_memory_user      ON bot_memory (user_id, accessed_at DESC)
-  WHERE expires_at IS NULL OR expires_at > NOW();
+-- Do not use NOW() in an index predicate: PostgreSQL requires immutable predicates.
+CREATE INDEX idx_memory_user      ON bot_memory (user_id, accessed_at DESC);
 CREATE INDEX idx_memory_expires   ON bot_memory (expires_at)
   WHERE expires_at IS NOT NULL;
 
@@ -109,11 +109,12 @@ CREATE INDEX idx_memory_expires   ON bot_memory (expires_at)
 -- ─────────────────────────────────────────────
 CREATE TABLE bot_job_queue (
   id           BIGSERIAL PRIMARY KEY,
+  update_id    BIGINT NOT NULL UNIQUE,          -- Telegram Update ID (deduplication)
   chat_id      BIGINT NOT NULL,
   user_id      BIGINT NOT NULL,
   update_json  JSONB NOT NULL,               -- Raw Telegram Update object
   status       TEXT NOT NULL DEFAULT 'pending'
-               CHECK (status IN ('pending','processing','done','failed','skipped')),
+               CHECK (status IN ('pending','processing','retrying','done','failed','skipped')),
   attempts     SMALLINT NOT NULL DEFAULT 0,
   max_attempts SMALLINT NOT NULL DEFAULT 3,
   error        TEXT,
@@ -124,7 +125,7 @@ CREATE TABLE bot_job_queue (
 );
 
 CREATE INDEX idx_jobs_dequeue ON bot_job_queue (status, run_at)
-  WHERE status IN ('pending');
+  WHERE status IN ('pending', 'retrying');
 CREATE INDEX idx_jobs_chat    ON bot_job_queue (chat_id, created_at DESC);
 
 -- ─────────────────────────────────────────────
@@ -134,7 +135,7 @@ CREATE INDEX idx_jobs_chat    ON bot_job_queue (chat_id, created_at DESC);
 -- ─────────────────────────────────────────────
 CREATE TABLE bot_dispatch_log (
   id              BIGSERIAL PRIMARY KEY,
-  session_id      UUID NOT NULL,
+  session_id      UUID NOT NULL REFERENCES bot_sessions(id) ON DELETE CASCADE,
   user_id         BIGINT NOT NULL,
   message_id      BIGINT REFERENCES bot_messages(id),
   input_text      TEXT NOT NULL,
@@ -162,6 +163,9 @@ CREATE INDEX idx_dispatch_intent  ON bot_dispatch_log (detected_intent)
 
 ```sql
 -- Returns the current active session for a user, or NULL if expired
+-- Serialize session lookup/creation for this user+chat before running the CTE:
+SELECT pg_advisory_xact_lock(hashtextextended($1::text || ':' || $2::text, 0));
+
 WITH active AS (
   SELECT id, locked_agent, locked_flow, flow_state, message_count
   FROM bot_sessions
@@ -185,7 +189,7 @@ RETURNING bot_sessions.*;
 ```sql
 WITH claimed AS (
   SELECT id FROM bot_job_queue
-  WHERE status = 'pending'
+  WHERE status IN ('pending', 'retrying')
     AND run_at <= NOW()
   ORDER BY created_at
   LIMIT 1
@@ -227,12 +231,19 @@ SELECT
     ORDER BY m.created_at
   ) FILTER (WHERE m.id IS NOT NULL)  AS history,
   (
-    SELECT json_agg(json_build_object('key', key, 'value', value, 'confidence', confidence))
-    FROM bot_memory
-    WHERE user_id = $1
-      AND (expires_at IS NULL OR expires_at > NOW())
-    ORDER BY accessed_at DESC
-    LIMIT 20
+    SELECT json_agg(json_build_object(
+      'key', memory.key,
+      'value', memory.value,
+      'confidence', memory.confidence
+    ) ORDER BY memory.accessed_at DESC)
+    FROM (
+      SELECT key, value, confidence, accessed_at
+      FROM bot_memory
+      WHERE user_id = $1
+        AND (expires_at IS NULL OR expires_at > NOW())
+      ORDER BY accessed_at DESC
+      LIMIT 20
+    ) AS memory
   ) AS memories
 FROM bot_sessions s
 LEFT JOIN bot_messages m ON m.session_id = s.id

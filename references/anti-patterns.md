@@ -22,9 +22,9 @@ async def webhook(update: dict):
     return {"ok": True}           # Telegram is satisfied
 ```
 
-**Why it breaks**: Telegram retries after 3 seconds. If your handler takes 4 seconds,
-Telegram sends the same message again. Now you have two LLM calls, two responses,
-a confused user, and doubled cost.
+**Why it breaks**: webhook delivery can be retried after an unsuccessful or
+interrupted response. Without `update_id` deduplication, the same update can
+produce two LLM calls, two responses, and doubled cost.
 
 ---
 
@@ -39,12 +39,15 @@ async def process(update: dict):
 async def process(update: dict):
     update_id = update["update_id"]
     async with pool.acquire() as conn:
+        message = update.get("message") or update.get("callback_query", {}).get("message", {})
+        actor = update.get("callback_query", {}).get("from") or message.get("from", {})
         inserted = await conn.fetchval("""
-            INSERT INTO bot_job_queue (update_id, update_json, status)
-            VALUES ($1, $2, 'pending')
+            INSERT INTO bot_job_queue
+              (update_id, chat_id, user_id, update_json, status)
+            VALUES ($1, $2, $3, $4, 'pending')
             ON CONFLICT (update_id) DO NOTHING
             RETURNING id
-        """, update_id, json.dumps(update))
+        """, update_id, message["chat"]["id"], actor["id"], json.dumps(update))
         if not inserted:
             return   # Already processed
 ```
