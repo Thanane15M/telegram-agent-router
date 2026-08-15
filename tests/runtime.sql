@@ -24,8 +24,19 @@ SELECT
   (s).message_count AS second_count
 FROM (SELECT telegram_agent.get_or_create_session('bot-a', 1001, 1001) AS s) q \gset
 
-SELECT CASE WHEN :'first_id'::uuid = :'second_id'::uuid THEN 1 ELSE 1/0 END AS same_session_assertion;
-SELECT CASE WHEN :second_count::integer = 2 THEN 1 ELSE 1/0 END AS message_count_assertion;
+SELECT :'first_id'::uuid = :'second_id'::uuid AS ok_same_session \gset
+\if :ok_same_session
+\else
+  \echo 'get_or_create_session returned a different active session'
+  \quit 1
+\endif
+
+SELECT :second_count::integer = 2 AS ok_message_count \gset
+\if :ok_message_count
+\else
+  \echo 'get_or_create_session did not increment message_count'
+  \quit 1
+\endif
 
 INSERT INTO telegram_agent.jobs (bot_id, update_id, chat_id, user_id, update_json, expires_at)
 VALUES ('bot-a', 5001, 1001, 1001, '{"update_id":5001}', now() + interval '1 day')
@@ -33,22 +44,50 @@ ON CONFLICT (bot_id, update_id) DO NOTHING;
 INSERT INTO telegram_agent.jobs (bot_id, update_id, chat_id, user_id, update_json, expires_at)
 VALUES ('bot-a', 5001, 1001, 1001, '{"update_id":5001,"duplicate":true}', now() + interval '1 day')
 ON CONFLICT (bot_id, update_id) DO NOTHING;
-SELECT CASE WHEN count(*) = 1 THEN 1 ELSE 1/0 END AS update_dedupe_assertion
-FROM telegram_agent.jobs WHERE bot_id = 'bot-a' AND update_id = 5001;
+
+SELECT count(*) = 1 AS ok_update_dedupe
+FROM telegram_agent.jobs WHERE bot_id = 'bot-a' AND update_id = 5001 \gset
+\if :ok_update_dedupe
+\else
+  \echo 'duplicate update_id created more than one durable job'
+  \quit 1
+\endif
 
 SELECT
   (j).status AS claimed_status,
   (j).attempts AS claimed_attempts
 FROM (SELECT telegram_agent.claim_job('bot-a') AS j) q \gset
-SELECT CASE WHEN :'claimed_status' = 'processing' THEN 1 ELSE 1/0 END AS claim_status_assertion;
-SELECT CASE WHEN :claimed_attempts::integer = 1 THEN 1 ELSE 1/0 END AS claim_attempt_assertion;
 
-SELECT CASE WHEN count(*) = 0 THEN 1 ELSE 1/0 END AS cross_bot_read_assertion
-FROM telegram_agent.bot_agent_registry WHERE bot_id = 'bot-b';
+SELECT :'claimed_status' = 'processing' AS ok_claim_status \gset
+\if :ok_claim_status
+\else
+  \echo 'claim_job did not mark job processing'
+  \quit 1
+\endif
+
+SELECT :claimed_attempts::integer = 1 AS ok_claim_attempt \gset
+\if :ok_claim_attempt
+\else
+  \echo 'claim_job did not increment attempts'
+  \quit 1
+\endif
+
+SELECT count(*) = 0 AS ok_cross_bot_read
+FROM telegram_agent.bot_agent_registry WHERE bot_id = 'bot-b' \gset
+\if :ok_cross_bot_read
+\else
+  \echo 'RLS exposed a different bot_id'
+  \quit 1
+\endif
 
 RESET app.bot_id;
-SELECT CASE WHEN count(*) = 0 THEN 1 ELSE 1/0 END AS missing_context_fails_closed_assertion
-FROM telegram_agent.bot_agent_registry;
+SELECT count(*) = 0 AS ok_missing_context
+FROM telegram_agent.bot_agent_registry \gset
+\if :ok_missing_context
+\else
+  \echo 'RLS did not fail closed when app.bot_id was missing'
+  \quit 1
+\endif
 
 RESET ROLE;
 DROP SCHEMA telegram_agent CASCADE;
