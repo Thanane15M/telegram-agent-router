@@ -1,215 +1,93 @@
-# Anti-Patterns — 8 Production Failures and Their Fixes
+# Anti-patterns — failure modes to test
 
-Every pattern here has been encountered in production Telegram bots.
-Each one is silent until it breaks everything at scale.
+These are architecture failure modes, not claims that one deployment choice is universally correct.
 
----
+## 1. Slow work before durable dedupe
 
-## 1. Synchronous LLM in Webhook Handler
+**Failure:** webhook handling calls an LLM/tool before recording `update_id`; retry can repeat cost/side effects.
 
-```python
-# ❌ BREAKS at ~10 concurrent users. Telegram starts retrying. You get duplicate messages.
-@app.post("/webhook")
-async def webhook(update: dict):
-    response = await llm.generate(update["message"]["text"])  # 3-8 seconds
-    await send_message(response)
-    return {"ok": True}
+**Correction:** validate → durable insert with unique `(bot_id, update_id)` → acknowledge → worker.
 
-# ✅ Queue immediately, process in worker
-@app.post("/webhook")
-async def webhook(update: dict):
-    await enqueue(update)         # < 5ms
-    return {"ok": True}           # Telegram is satisfied
-```
+**Regression test:** deliver the same update twice and prove only one durable job/side-effect idempotency key is accepted.
 
-**Why it breaks**: webhook delivery can be retried after an unsuccessful or
-interrupted response. Without `update_id` deduplication, the same update can
-produce two LLM calls, two responses, and doubled cost.
+## 2. Process-local deduplication
 
----
+**Failure:** an in-memory set works until restart/horizontal scaling.
 
-## 2. No Update ID Deduplication
+**Correction:** durable unique constraint or another shared idempotency authority.
 
-```python
-# ❌ On network hiccup, Telegram resends. User gets duplicate responses.
-async def process(update: dict):
-    await handle(update)
+## 3. Indefinite session/flow lock
 
-# ✅ Deduplicate by update_id
-async def process(update: dict):
-    update_id = update["update_id"]
-    async with pool.acquire() as conn:
-        message = update.get("message") or update.get("callback_query", {}).get("message", {})
-        actor = update.get("callback_query", {}).get("from") or message.get("from", {})
-        inserted = await conn.fetchval("""
-            INSERT INTO bot_job_queue
-              (update_id, chat_id, user_id, update_json, status)
-            VALUES ($1, $2, $3, $4, 'pending')
-            ON CONFLICT (update_id) DO NOTHING
-            RETURNING id
-        """, update_id, message["chat"]["id"], actor["id"], json.dumps(update))
-        if not inserted:
-            return   # Already processed
-```
+**Failure:** a crashed/abandoned flow traps future messages.
 
-Add `UNIQUE (update_id)` to your job queue table.
+**Correction:** explicit cancel/reset path, idle/expiry policy, and validation that the locked agent/flow still exists.
 
----
+## 4. Unbounded conversation context
 
-## 3. Session Lock Without TTL
+**Failure:** every message is sent to every agent forever, increasing cost and privacy exposure.
 
-```python
-# ❌ Agent sets session lock, then crashes mid-flow.
-# User is permanently locked to a broken flow. No way out.
-await conn.execute(
-    "UPDATE sessions SET locked_agent = $2 WHERE id = $1",
-    session_id, 'onboarding'
-)
+**Correction:** count/time/token bounded recent history, task-specific retrieval, deliberate summaries with provenance, and retention.
 
-# ✅ Always set lock expiry. Always honor /cancel.
-await conn.execute("""
-    UPDATE sessions
-    SET locked_agent = $2,
-        lock_expires_at = NOW() + INTERVAL '10 minutes'  -- Auto-release
-    WHERE id = $1
-""", session_id, 'onboarding')
+Do not use a universal “last N messages” as a magic constant; evaluate context sufficiency for each task class.
 
-# In your webhook handler, always check /cancel first:
-if text == '/cancel' or text == '/reset':
-    await conn.execute("""
-        UPDATE sessions
-        SET locked_agent = NULL, locked_flow = NULL, flow_state = '{}'
-        WHERE id = $1
-    """, session_id)
-    await send("Flow cancelled. What would you like to do?")
-    return
-```
+## 5. Prompt as access control
 
----
+**Failure:** a prompt says “never refund without approval” but the model still has an unrestricted refund tool.
 
-## 4. Passing Full Conversation History to Every Agent
+**Correction:** runtime permission/policy gate, idempotency, amount/role bounds and human approval where required.
 
-```python
-# ❌ History grows unboundedly. Token costs explode. Context window exceeded.
-history = await conn.fetch(
-    "SELECT * FROM messages WHERE session_id = $1 ORDER BY created_at", session_id
-)
-# After 50 messages: 25,000 tokens of history just for context
+## 6. Sensitive memory without purpose/expiry
 
-# ✅ Time-bound + count-bound. Compress old messages.
-history = await conn.fetch("""
-    SELECT role, content FROM messages
-    WHERE session_id = $1
-      AND created_at > NOW() - INTERVAL '2 hours'  -- Time bound
-      AND compressed = FALSE                         -- Skip already-compressed
-    ORDER BY created_at DESC
-    LIMIT 10                                         -- Count bound
-""", session_id)
-# Then reverse for chronological order
-history = list(reversed(history))
-```
+**Failure:** secrets or highly sensitive personal data become persistent “memory.”
 
-**Rule of thumb**: Most agents need the last 5-10 messages.
-For longer context, compress old messages to a summary (see SKILL.md → Context Compression).
+**Correction:** never store credentials/payment secrets in conversational memory; minimize data, record source/purpose, expire where appropriate.
 
----
+## 7. Transport dogma
 
-## 5. Monolithic Agent That Handles Everything
+**Failure:** “webhook always” or “long polling always” is treated as a production law.
 
-```python
-# ❌ One agent prompt: 3000 tokens covering all domains.
-# Result: inconsistent behavior, confusing responses, impossible to debug.
-SYSTEM_PROMPT = """
-You are an assistant. You help with sales, technical support, billing,
-account management, product recommendations, legal questions, HR policies,
-and general company information. When asked about pricing, check the catalog.
-When asked about support, troubleshoot first. When asked about contracts...
-[2000 more words]
-"""
+Telegram supports both webhook and long polling. Choose based on deployment/runtime requirements. For webhooks, dedupe and prompt acknowledgement are critical; for polling, correctly advance offsets and ensure one logical consumer model.
 
-# ✅ Smaller, focused agents. Each does one thing excellently.
-SALES_PROMPT = """
-You are a sales specialist. You help with pricing, quotes, and purchase decisions.
-Nothing else. If asked about anything else, acknowledge and redirect:
-"That's not my area — use /support for technical help or /billing for account questions."
-"""
-# ~150 tokens. Predictable. Debuggable. Cheap.
-```
+## 8. Omnipotent fallback
 
----
+**Failure:** classification failure routes to a generic agent that has every tool.
 
-## 6. Storing Sensitive Data in Memory Without Expiry
+**Correction:** fallback is intentionally low-authority: clarify, answer low-risk general questions, present capabilities, or escalate.
 
-```python
-# ❌ "Learning" credit card numbers, passwords, personal health data
-# These accumulate in bot_memory forever.
-await write_memory(user_id, 'credit_card', '4242-4242-4242-4242')
+## 9. Holding DB resources across model/network latency
 
-# ✅ Sensitive data: never store. Semi-sensitive: always set TTL.
-# For anything a user might consider private:
-await conn.execute("""
-    INSERT INTO bot_memory (user_id, key, value, expires_at, source)
-    VALUES ($1, $2, $3, NOW() + INTERVAL '24 hours', 'user')
-    ON CONFLICT (user_id, key) DO UPDATE
-      SET value = EXCLUDED.value, expires_at = EXCLUDED.expires_at
-""", user_id, 'session_context', sanitized_value)
-# Never store: passwords, payment data, government IDs, health information
-```
+**Failure:** a worker keeps a transaction/connection open while waiting seconds for LLMs or external APIs, increasing lock/pool pressure.
 
----
+**Correction:** short database transactions around durable state; release scarce resources before long external waits unless an explicit consistency pattern requires otherwise.
 
-## 7. Using `getUpdates` Polling in Production
+## 10. Classifier confidence as authorization
 
-```python
-# ❌ Long-polling. Works locally. Breaks under load.
-while True:
-    updates = bot.get_updates(offset=last_update_id)
-    for update in updates:
-        process(update)
+**Failure:** a numeric model confidence directly triggers a privileged action.
 
-# ✅ Webhook. Period. Scales to thousands of concurrent users.
-# One-time setup:
-import httpx
-httpx.post(
-    f"https://api.telegram.org/bot{TOKEN}/setWebhook",
-    json={
-        "url": f"https://yourdomain.com/telegram/webhook",
-        "secret_token": YOUR_SECRET_TOKEN,
-        "allowed_updates": ["message", "callback_query"],
-        "max_connections": 100
-    }
-)
-# Verify:
-# GET https://api.telegram.org/bot{TOKEN}/getWebhookInfo
-```
+**Correction:** confidence helps routing/clarification; policy and approval authorize capabilities. Calibrate thresholds using evals, not generic example values.
 
----
+## 11. Raw user text as permanent audit log
 
-## 8. No Fallback Agent
+**Failure:** observability stores full conversations indefinitely when metadata would suffice.
 
-```python
-# ❌ Router cannot classify → exception → user sees nothing or a 500 error
-intent = await classify(message, agents)
-if not intent:
-    raise ValueError("No agent found")   # User gets no response
+**Correction:** log route reason, agent, timing, success/error class and minimal identifiers; store raw content only when necessary and under retention/access policy.
 
-# ✅ Always have a fallback. It never fails.
-DEFAULT_AGENT = GenericAgent(
-    name='default',
-    description='Handles anything not matched by specialized agents',
-    system_prompt="""
-    You are a helpful assistant. The user sent a message that didn't match
-    a specific category. Your job is to:
-    1. Acknowledge their question
-    2. Clarify what specialized help is available (/sales, /support, /billing)
-    3. Answer generally if you can
+## 12. RLS tested as superuser
 
-    Available commands:
-    {commands_list}
-    """
-)
+**Failure:** policies parse and owner queries pass, then isolation is declared verified.
 
-# In router:
-agent_id = intent.agent_id if intent.agent_id in self.agents else 'default'
-agent = self.agents[agent_id]
-```
+**Correction:** positive/negative tests through non-owner, non-`BYPASSRLS` roles with missing and cross-bot context.
+
+## 13. Telegram fixed-limit folklore
+
+**Failure:** one hard-coded global 30 msg/s limiter is assumed correct forever.
+
+**Correction:** separate traffic classes, honor 429 `retry_after`, keep current platform facts in a versioned verification file, and re-check upstream changes.
+
+## 14. Duplicate downstream effects
+
+**Failure:** webhook job is deduped, but retries create two invoices/emails/payments.
+
+**Correction:** propagate stable idempotency keys to each external effect or use a transactional outbox/consumer contract appropriate to that service.
+
+The pre-2026-08-15 anti-patterns are preserved at `anti-patterns.pre-2026-08-15.md`.

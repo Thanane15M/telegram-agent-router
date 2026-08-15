@@ -1,256 +1,86 @@
-# Telegram Constraints — Everything That Will Break Your Bot
+# Telegram constraints — current reference
 
-Production reference for the Telegram Bot API hard limits.
-Every number here is verified against the official API documentation.
+Last evidence review: **2026-08-15**. Platform limits are time-sensitive; verify the current Bot API and Bots FAQ before hard-coding them.
 
----
+## Webhook delivery
 
-## WEBHOOK CONSTRAINTS
+- Treat each `update_id` as an idempotency key for intake.
+- Return a successful webhook response promptly; slow LLM/tool work belongs in a durable background job.
+- Use `setWebhook.secret_token` and compare the `X-Telegram-Bot-Api-Secret-Token` header without logging the secret.
+- Restrict `allowed_updates` to update types the bot actually handles.
+- A retry-safe intake path must not double-charge, double-send, or repeat side effects when Telegram redelivers an update.
 
-| Constraint | Value | Consequence if violated |
-|---|---|---|
-| Webhook response | Return a successful response promptly | Failed or interrupted delivery may be retried |
-| Max webhook connections | 100 (default) | Adjust with `setWebhook.max_connections` |
-| Allowed update types | Must be declared | Undeclared types are silently dropped |
-| HTTPS required | Mandatory | HTTP webhooks rejected |
-| Port | 443, 80, 88, or 8443 | Other ports rejected |
-| Certificate | Must be valid | Self-signed allowed if you provide it |
+## Text size
 
-```python
-# Correct setWebhook call
-async def register_webhook(token: str, url: str, secret: str):
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"https://api.telegram.org/bot{token}/setWebhook",
-            json={
-                "url": url,
-                "secret_token": secret,               # Validate in handler
-                "allowed_updates": [                  # Only what you handle
-                    "message",
-                    "callback_query",
-                    "inline_query"                    # Remove if unused
-                ],
-                "max_connections": 100,
-                "drop_pending_updates": False         # Set True on first deploy
-            }
-        )
-    return resp.json()
+Current `sendMessage` documentation defines text as **1–4096 characters after entities parsing**.
 
-# Validate secret token in every webhook request
-def validate_webhook_secret(request_headers: dict, expected: str) -> bool:
-    received = request_headers.get("X-Telegram-Bot-Api-Secret-Token", "")
-    return secrets.compare_digest(received, expected)
-```
+Chunking code must therefore:
 
----
+- keep each final chunk within the current API limit;
+- avoid empty chunks;
+- consider Markdown/HTML entity parsing;
+- preserve ordering when multiple chunks are sent;
+- handle partial failure if chunk N succeeds and chunk N+1 fails.
 
-## MESSAGE SIZE LIMITS
+Use `examples/router_contract.py` for the repository's deterministic plain-text splitter.
 
-| Content type | Limit |
-|---|---|
-| Text message | **4096 characters** |
-| Caption (photo/video/document) | **1024 characters** |
-| Inline keyboard button text | **64 characters** |
-| Callback query data | **64 bytes** |
-| Inline query results | **50 results** |
-| Inline query answer cache | 300 seconds default |
+## Flood control and rate limits
+
+Telegram's current Bots FAQ advises:
+
+- in a single chat, avoid sustained rates above roughly **1 message/second**; short bursts may be tolerated before 429 responses;
+- in a group, bots cannot send more than **20 messages/minute**;
+- free bulk notifications are limited to roughly **30 messages/second**;
+- eligible paid broadcasts can increase bulk throughput substantially (currently documented up to 1000 messages/second).
+
+These are not a reason to implement one global fixed limiter for every traffic class.
+
+### Required behavior on 429
+
+Read `parameters.retry_after` from the Bot API error response and delay that operation accordingly. Keep retries bounded and idempotent.
 
 ```python
-# Inline keyboard callback data: 64 bytes max.
-# Use structured prefixes to route callbacks:
+from examples.router_contract import telegram_retry_after
 
-# ❌ Too much data in callback
-callback_data = json.dumps({"action": "approve_quote", "quote_id": 12345, "user_id": 67890})
-# 60 bytes — technically ok but fragile at scale
-
-# ✅ Use prefix:id pattern, look up full data from DB
-callback_data = "approve:12345"   # 14 bytes — safe, unambiguous
-
-# In your router:
-if ':' in callback_data:
-    prefix, payload = callback_data.split(':', 1)
-    # Route by prefix
-    CALLBACK_ROUTES = {
-        'approve': ApproveHandler,
-        'reject':  RejectHandler,
-        'view':    ViewHandler,
-    }
-    handler = CALLBACK_ROUTES.get(prefix, DefaultHandler)
-    await handler.handle(payload, ctx)
+payload = {"parameters": {"retry_after": 3}}
+delay = telegram_retry_after(payload)
 ```
 
----
+## Draft streaming
 
-## RATE LIMITS
+The current Bot API exposes `sendMessageDraft` for partial generated-message UX. Current documentation describes the draft as temporary/ephemeral and requires sending the final durable message separately.
 
-| Limit | Value | Notes |
-|---|---|---|
-| Global message rate | **30 messages/second** | Across all chats combined |
-| Per-chat rate | **~1 message/second** | Soft limit, enforced per chat |
-| Flood control | 429 error with `retry_after` | Respect the field in the error |
-| `getUpdates` polling | 1 request/second max | Use webhooks instead |
+Treat draft streaming as optional:
 
-```python
-import asyncio
-import httpx
+- verify current support/constraints before enabling it;
+- do not use a draft as the durable conversation record;
+- use a stable non-zero draft ID when the current API requires one;
+- still apply output validation, privacy controls and final-send error handling.
 
-async def send_with_retry(token: str, chat_id: int, text: str, max_retries: int = 3):
-    """Send message with automatic rate limit handling."""
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
+## Typing indicator
 
-    for attempt in range(max_retries):
-        try:
-            async with httpx.AsyncClient() as client:
-                resp = await client.post(url, json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "Markdown"
-                }, timeout=10.0)
+`sendChatAction` is UX only; the typing status expires automatically after a short interval (currently documented as 5 seconds or less). It is not job state, a lock, or proof that work is still running.
 
-            data = resp.json()
+## Callback data
 
-            if resp.status_code == 429:
-                retry_after = data.get("parameters", {}).get("retry_after", 5)
-                await asyncio.sleep(retry_after + 0.5)    # Add buffer
-                continue
+Keep callback payloads small and opaque. Prefer a short prefix + identifier and load authoritative state from PostgreSQL rather than embedding sensitive/full business state into buttons.
 
-            if not data.get("ok"):
-                raise ValueError(f"Telegram error: {data.get('description')}")
-
-            return data["result"]
-
-        except httpx.TimeoutException:
-            if attempt == max_retries - 1:
-                raise
-            await asyncio.sleep(2 ** attempt)
-
-    raise RuntimeError(f"Failed to send after {max_retries} attempts")
+```text
+approve:quote_123
+reject:quote_123
 ```
 
----
+Never place secrets, access tokens or personal data in callback data.
 
-## PARSE MODES
+## Formatting
 
-Telegram supports three text formatting modes.
-Choose one per message — they cannot be mixed.
+For dynamic/user-generated text, plain text or correctly escaped HTML/MarkdownV2 is safer than concatenating untrusted markup.
 
-```python
-# MarkdownV2 (recommended — most features, strictest escaping)
-# Must escape these characters: _ * [ ] ( ) ~ ` > # + - = | { } . !
-def escape_md2(text: str) -> str:
-    """Escape all special chars for MarkdownV2."""
-    chars = r'_*[]()~`>#+-=|{}.!'
-    return re.sub(f'([{re.escape(chars)}])', r'\\\1', text)
+When message formatting fails, do not silently drop the response; log the error class without sensitive content and use a safe fallback where the product requires it.
 
-# HTML (easier for dynamic content — no escaping hell)
-# Supported tags: <b>, <i>, <u>, <s>, <code>, <pre>, <a href="">
-def format_html(title: str, body: str) -> str:
-    return f"<b>{html.escape(title)}</b>\n\n{html.escape(body)}"
+## Source links
 
-# Plain text (safest — use when content is user-generated)
-# No formatting, but also no accidental parse errors
-```
+- Bot API: `https://core.telegram.org/bots/api`
+- Bots FAQ: `https://core.telegram.org/bots/faq`
 
----
-
-## INLINE KEYBOARDS — PRODUCTION PATTERNS
-
-```python
-from typing import Optional
-
-def build_inline_keyboard(buttons: list[list[dict]]) -> dict:
-    """
-    buttons: [[{'text': 'Approve', 'callback_data': 'approve:123'}]]
-    Max 8 buttons per row. Max 100 buttons total.
-    """
-    return {"inline_keyboard": buttons}
-
-# Pagination pattern (common for long lists)
-def paginated_keyboard(
-    items: list[tuple[str, str]],   # (label, callback_data)
-    page: int,
-    page_size: int = 5,
-    prefix: str = "page"
-) -> dict:
-    start = page * page_size
-    page_items = items[start:start + page_size]
-
-    rows = [[{"text": label, "callback_data": data}] for label, data in page_items]
-
-    nav = []
-    if page > 0:
-        nav.append({"text": "← Prev", "callback_data": f"{prefix}:{page-1}"})
-    if start + page_size < len(items):
-        nav.append({"text": "Next →", "callback_data": f"{prefix}:{page+1}"})
-    if nav:
-        rows.append(nav)
-
-    return build_inline_keyboard(rows)
-
-# Always handle "message not modified" error when editing keyboards
-async def safe_edit_keyboard(message_id: int, chat_id: int, keyboard: dict, token: str):
-    try:
-        await edit_message_reply_markup(message_id, chat_id, keyboard, token)
-    except TelegramError as e:
-        if "message is not modified" in str(e).lower():
-            pass   # Ignore — this is fine
-        else:
-            raise
-```
-
----
-
-## TYPING INDICATOR — USER EXPERIENCE
-
-Always show "typing..." for responses that take > 500ms.
-
-```python
-async def send_with_typing(chat_id: int, generate_fn, token: str):
-    """Show typing indicator while generating response."""
-    # Start typing indicator
-    typing_task = asyncio.create_task(
-        send_chat_action(chat_id, "typing", token)
-    )
-
-    try:
-        # Generate response (can take 2-10 seconds)
-        response = await generate_fn()
-    finally:
-        typing_task.cancel()
-
-    # Typing indicator auto-expires after 5 seconds.
-    # For very long generations, send it every 4 seconds:
-    # while generating: await send_chat_action(chat_id, "typing"); await asyncio.sleep(4)
-
-    await send_message(chat_id, response, token)
-
-async def send_chat_action(chat_id: int, action: str, token: str):
-    """Valid actions: typing, upload_photo, record_video, upload_document, etc."""
-    async with httpx.AsyncClient() as client:
-        await client.post(
-            f"https://api.telegram.org/bot{token}/sendChatAction",
-            json={"chat_id": chat_id, "action": action}
-        )
-```
-
----
-
-## DEEP LINKS — BOT ENTRY POINTS
-
-```python
-# Start link with parameter (for onboarding flows, referrals, etc.)
-# https://t.me/YourBot?start=ref_12345
-
-# In your /start handler:
-async def handle_start(message: dict) -> AgentResponse:
-    args = message.get('text', '').split()
-    if len(args) > 1:
-        start_param = args[1]   # e.g., 'ref_12345'
-        # Decode and handle: referral tracking, deep link to specific flow, etc.
-        if start_param.startswith('ref_'):
-            referrer_id = start_param[4:]
-            await write_memory(user_id, 'referred_by', referrer_id)
-        elif start_param.startswith('flow_'):
-            flow_name = start_param[5:]
-            # Start specific onboarding flow
-```
+The pre-2026-08-15 constraints document is preserved at `telegram-constraints.pre-2026-08-15.md`.
