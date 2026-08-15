@@ -1,266 +1,152 @@
-# Agent Design — Specialization Principles & Handoff Patterns
+# Agent design — specialization, permissions and handoffs
 
----
+Specialization is useful when it creates a **real boundary**, not merely because traffic crossed an arbitrary percentage.
 
-## WHEN TO CREATE A NEW AGENT (vs extend the router)
+## When a specialist is justified
 
-Create a new specialized agent when:
+Separate a specialist when one or more of these materially differ:
 
-| Signal | Example |
-|---|---|
-| Distinct domain vocabulary | Finance agent needs accounting terms the others don't |
-| Different system prompt length | Legal agent needs 2000-token prompt, others use 500 |
-| Different tool access | Data agent needs DB query access, others don't |
-| Different response format | Report agent outputs structured JSON, others output prose |
-| User explicitly asks for separation | "Talk to the sales team" should mean a different agent |
-| Routing creates confusion | Users get inconsistent answers from the same agent on different domains |
+- allowed tools or data scope;
+- policy/compliance constraints;
+- domain knowledge/context that would otherwise pollute unrelated tasks;
+- output contract or validation rules;
+- human escalation/approval path;
+- ownership/SLO/observability requirements;
+- eval dataset and failure modes.
 
-**Do NOT create a new agent when:**
-- The difference is just tone (use prompt conditionals instead)
-- You have < 5 distinct use cases total (one agent with few conditionals is simpler)
-- The agent would handle < 10% of traffic (fold it into the orchestrator)
+Do not create a new specialist only for tone, branding, or a fixed traffic threshold. Prefer the simplest architecture that keeps policy and behavior clear.
 
----
+## Required agent definition
 
-## AGENT SPECIALIZATION FRAMEWORK
+Every registered agent should have:
 
-Every agent needs these three elements precisely defined:
-
-### 1. Scope Definition (what this agent handles AND what it doesn't)
-
-```python
-class SalesAgent(AgentBase):
-    name = "sales"
-    description = (
-        "Handles: pricing inquiries, quotes, product comparisons, purchase decisions, "
-        "discount requests, upsells. "
-        "Does NOT handle: technical support, billing issues, account management."
-    )
-    # The description is given verbatim to the LLM orchestrator.
-    # The 'Does NOT handle' section is critical — it tells the router when NOT to use this agent.
+```text
+id / display name
+scope: handles / does-not-handle
+input contract
+output contract
+allowed tools
+forbidden capabilities
+memory read/write policy
+side-effect policy
+human-approval rules
+fallback/escalation rules
+eval cases
 ```
 
-### 2. Context Requirements (what data the agent needs)
+Prompts describe behavior; **runtime permissions enforce authority**.
+
+## Typed context
+
+Pass the minimum context required for the selected task.
+
+```python
+from dataclasses import dataclass
+from typing import Any
+
+@dataclass(frozen=True)
+class AgentContext:
+    bot_id: str
+    user_id: int
+    chat_id: int
+    session_id: str
+    message: str
+    recent_history: tuple[dict[str, Any], ...] = ()
+    user_memory: tuple[dict[str, Any], ...] = ()
+    active_flow: str | None = None
+```
+
+Do not pass other agents' hidden prompts, credentials, unrestricted tool handles, or unrelated personal data.
+
+## Handoff invariant
+
+A handoff transfers **task context**, not authority.
+
+```text
+Agent A recommends handoff
+→ router validates target agent exists/is active
+→ runtime constructs a new target-specific context
+→ target agent receives only its allowed tools/data
+→ sensitive side effects still pass target policy/human gates
+```
+
+Never serialize `ctx.__dict__` wholesale into a follow-up job when it can include data the target does not need.
+
+## Side effects
+
+Agent output should propose structured effects; a policy layer validates them before execution.
 
 ```python
 @dataclass
-class SalesAgentContext:
-    # From session memory
-    user_budget: Optional[str]       # 'enterprise' | 'smb' | 'startup'
-    previous_quotes: list[dict]      # Past quotes this user received
-    # From long-term memory
-    company_size: Optional[str]
-    industry: Optional[str]
-    # Never include: other agents' conversation history, system internals
+class ProposedAction:
+    action_type: str
+    arguments: dict
+    idempotency_key: str | None = None
+    requires_human_approval: bool = False
 ```
 
-### 3. Typed Output Contract
+A model saying “refund approved” is not the same as an authorized refund operation.
 
-```python
-@dataclass
-class SalesAgentResponse(AgentResponse):
-    # Required: what every response must produce
-    text: str
-    # Optional: side effects
-    memory_writes: list[dict]        # Facts learned about user
-    quote_generated: Optional[dict]  # If a quote was produced
-    escalation_needed: bool = False  # Should a human follow up?
-```
+## Registry
 
----
+The registry is the source of truth for routable specialists. In multi-bot deployments, identity is `(bot_id, agent_id)`.
 
-## SYSTEM PROMPT ARCHITECTURE
+The application may construct in-process handlers at startup, but registry synchronization must not silently activate an agent with broader permissions than the runtime policy grants.
 
-A well-structured agent system prompt has exactly these sections, in this order:
+## Memory writes
 
-```
-IDENTITY (2-3 sentences)
-Who you are, what you do, what you don't do.
+Memory is deliberate output, not automatic transcript ingestion.
 
-CONTEXT (injected at runtime)
-Current conversation history, user memory, session state.
+For each write, define:
 
-CAPABILITIES (bullet list)
-What tools/data you have access to.
+- key/value or structured schema;
+- source (`explicit`, `inferred`, `system`);
+- confidence when inferred;
+- purpose and expiry;
+- whether the target agent may read it later.
 
-CONSTRAINTS (bullet list — CRITICAL)
-Hard rules that cannot be overridden by user instructions.
-Examples:
-- Never quote prices you're not sure about
-- Always ask for budget before recommending
-- Never discuss competitors by name
+Never store passwords, full payment credentials, authentication tokens or other secrets in conversational memory.
 
-RESPONSE FORMAT
-How to structure your output.
-Be specific: "Respond in 2-4 paragraphs. Start with the direct answer.
-If unsure, say so explicitly."
+## Prompt structure
 
-ESCALATION TRIGGERS
-When to hand off to a human or another agent.
-```
+Use the structure that makes the target agent reliable; there is no universal requirement for an exact number/order of prompt sections.
 
-```python
-SALES_SYSTEM_PROMPT = """
-IDENTITY
-You are a specialized sales assistant. You handle pricing, quotes, and purchase decisions.
-You do NOT handle technical support, billing disputes, or account management — redirect
-those to the appropriate team.
+At minimum, prompts should make clear:
 
-CONTEXT
-User history: {recent_history}
-Known facts about this user: {user_memory}
+- scope and exclusions;
+- relevant context;
+- output format;
+- uncertainty behavior;
+- escalation/handoff rules.
 
-CAPABILITIES
-- Quote generation for standard product tiers
-- Discount authority up to 15% (request approval above that)
-- Access to current pricing catalog
+Capabilities and security constraints must also exist in runtime policy, not only prompt prose.
 
-CONSTRAINTS
-- Never commit to a price without checking the current catalog
-- Always confirm budget range before presenting options
-- Never quote a timeline shorter than the standard SLA
+## Handoff patterns
 
-RESPONSE FORMAT
-Respond in 1-3 paragraphs. Lead with the direct answer or question.
-If you need more information, ask ONE question only — not multiple at once.
-Use plain language, no jargon.
+### Redirect
 
-ESCALATION
-If the user asks about contract terms, legal clauses, or payment disputes,
-say: "Let me connect you with our contracts team for that."
-"""
-```
+Use when the current agent can safely tell the user which specialist owns the task; the next user message is routed normally.
 
----
+### Router-controlled handoff
 
-## HANDOFF PATTERNS
+The current agent emits a structured `handoff_request`; the router validates the destination and reconstructs minimal context.
 
-### Pattern 1: Hard Handoff (different agent takes over completely)
+### Collaborative workflow
 
-```python
-# Agent A detects the message is out of its scope
-async def handle(self, ctx: AgentContext) -> AgentResponse:
-    if "invoice" in ctx.message.lower() and self.name == "sales":
-        return AgentResponse(
-            text="That sounds like a billing question — let me connect you "
-                 "with the finance team. Just say /finance to reach them.",
-            agent_name=self.name,
-            memory_writes=[],
-            unlock_session=True,   # Release lock so router can dispatch to finance
-        )
-```
+Use multiple specialists only when each step has a clear contract and adds measurable value. Keep intermediate artifacts structured, validate them, and avoid concatenating untrusted free text directly into another system prompt.
 
-### Pattern 2: Soft Handoff (orchestrator decides)
+## Observability
 
-```python
-# Agent signals it cannot fully answer, orchestrator adds context
-async def handle(self, ctx: AgentContext) -> AgentResponse:
-    response = await self.llm.generate(self.system_prompt, ctx.message)
-    if "[NEEDS_EXPERT]" in response:   # Agent uses a sentinel in its prompt
-        # Queue a job for the specialized agent
-        return AgentResponse(
-            text="Let me pull in a specialist for this one — give me a moment.",
-            agent_name=self.name,
-            follow_up_job={
-                'agent': 'specialist',
-                'context': ctx.__dict__,
-                'priority': 1
-            }
-        )
-```
+Track at least:
 
-### Pattern 3: Collaborative (agents contribute sequentially)
+- route reason and target;
+- classifier confidence (when used);
+- success/failure/error class;
+- latency and retry count;
+- handoff count;
+- clarification rate;
+- human escalation rate.
 
-```python
-# Orchestrator runs multiple agents and combines responses
-async def collaborative_handle(self, ctx: AgentContext) -> AgentResponse:
-    # Agent A: gets facts
-    facts = await self.agents['data'].handle(ctx)
-    # Agent B: turns facts into recommendation
-    ctx_with_facts = replace(ctx, message=ctx.message + f"\n\nData: {facts.text}")
-    recommendation = await self.agents['advisor'].handle(ctx_with_facts)
+Use these metrics plus labeled evals to decide whether a scope/description/routing rule should change.
 
-    return AgentResponse(
-        text=recommendation.text,
-        agent_name='orchestrator',
-        memory_writes=facts.memory_writes + recommendation.memory_writes,
-    )
-```
-
----
-
-## AGENT REGISTRY PATTERN
-
-The registry is the single source of truth for what agents exist.
-Never hardcode agent names in routing logic.
-
-```python
-class AgentRegistry:
-    def __init__(self, pool: asyncpg.Pool):
-        self.pool = pool
-        self._agents: dict[str, AgentBase] = {}
-
-    def register(self, agent: AgentBase):
-        """Call at startup for each agent."""
-        self._agents[agent.name] = agent
-
-    async def sync_to_db(self):
-        """Persist current registry to PostgreSQL."""
-        async with self.pool.acquire() as conn:
-            for agent in self._agents.values():
-                await conn.execute("""
-                    INSERT INTO bot_agent_registry
-                      (id, display_name, description, commands, intent_hints, is_active)
-                    VALUES ($1, $2, $3, $4, $5, $6)
-                    ON CONFLICT (id) DO UPDATE
-                      SET display_name = EXCLUDED.display_name,
-                          description  = EXCLUDED.description,
-                          commands     = EXCLUDED.commands,
-                          intent_hints = EXCLUDED.intent_hints,
-                          updated_at   = NOW()
-                """, agent.name, agent.display_name, agent.description,
-                    agent.commands, agent.intent_keywords, True)
-
-    def get_menu_text(self) -> str:
-        """Generate help menu automatically from registry."""
-        lines = ["*Available commands:*\n"]
-        for agent in self._agents.values():
-            if agent.commands:
-                cmd = agent.commands[0]
-                lines.append(f"{cmd} — {agent.description[:60]}")
-        return "\n".join(lines)
-
-    def all_active(self) -> list[AgentBase]:
-        return [a for a in self._agents.values() if a.is_active]
-```
-
----
-
-## OBSERVABILITY — MAKING THE ROUTER DEBUGGABLE
-
-Without this, you cannot improve routing quality over time.
-
-```python
-# After 1 week in production, run this query to find routing problems:
-ROUTING_AUDIT_QUERY = """
-SELECT
-  input_text,
-  detected_intent,
-  confidence,
-  target_agent,
-  route_reason,
-  COUNT(*) AS occurrences
-FROM bot_dispatch_log
-WHERE created_at > NOW() - INTERVAL '7 days'
-  AND confidence < 0.7          -- Low-confidence dispatches
-  AND route_reason = 'llm'      -- Not from fast-path
-GROUP BY 1,2,3,4,5
-ORDER BY occurrences DESC
-LIMIT 20;
-"""
-
-# Use the results to:
-# - Add these phrases to agent.intent_keywords (fast-path them next time)
-# - Improve agent.description (make LLM classification more accurate)
-# - Create new agents if a clear cluster emerges
-```
+The pre-2026-08-15 document is preserved at `agent-design.pre-2026-08-15.md`.

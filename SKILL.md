@@ -1,399 +1,167 @@
 ---
 name: telegram-agent-router
 description: >
-  Multi-agent Telegram bot architecture with PostgreSQL-native state management.
-  10+ specialized agents, intent-based routing, persistent cross-session memory,
-  and production-grade conversation state machines. Activate when building or
-  debugging Telegram bots with multiple agents, routing logic, conversation
-  context, or persistent memory. Trigger phrases: "telegram bot agents",
-  "multi-agent telegram", "route messages to agents", "telegram bot router",
-  "conversation state telegram", "persistent memory bot", "telegram intent
-  classification", "agent handoff telegram", "telegram session state",
-  "specialize telegram bot", "telegram webhook architecture".
+  Designs and reviews durable Telegram multi-agent routing with idempotent webhook
+  intake, fast-path intent routing, bounded agent contracts, PostgreSQL-backed
+  sessions/memory/jobs, rate-limit handling, and privacy-aware auditability. Use
+  when building or debugging Telegram bots that coordinate multiple specialized
+  agents, persistent conversation state, handoffs, callbacks, or background work.
 ---
 
-# Telegram Agent Router — Multi-Agent Architecture
+# Telegram Agent Router
 
-> **Core thesis**: A Telegram bot is not a chatbot. It is a routing layer
-> over a team of specialists, backed by a PostgreSQL state machine.
-> Every message is a dispatch decision. Every conversation is a session.
-> Every session has memory.
+A Telegram bot with multiple specialists should be designed as a **message router with durable state**, not as one giant prompt.
 
-This skill documents the architecture, patterns, and production code for
-building Telegram bots that coordinate multiple specialized AI agents with
-PostgreSQL-native state, intent-based routing, and persistent cross-session memory.
+The architecture in this repository optimizes for:
 
-**Targets production multi-agent Telegram deployments with durable PostgreSQL state.**
+- idempotent webhook intake;
+- prompt response to Telegram while slow work continues asynchronously;
+- deterministic fast paths before LLM routing;
+- explicit agent contracts and bounded permissions;
+- durable PostgreSQL state where it fits the workload;
+- privacy-aware memory and audit data;
+- measurable routing quality and failure recovery.
 
----
+## Core architecture
 
-## ARCHITECTURE OVERVIEW
-
-```
-User
- │
- ▼ HTTPS (Telegram sends to your endpoint)
-┌────────────────────────────────────────────┐
-│  WEBHOOK RECEIVER                          │
-│  /telegram/webhook                         │
-│  Validates token · Deduplicates · Queues   │
-└──────────────┬─────────────────────────────┘
-               │
-               ▼
-┌────────────────────────────────────────────┐
-│  INTENT CLASSIFIER                         │
-│  command → direct dispatch                 │
-│  free text → LLM classification           │
-│  ambiguous → confidence check             │
-└──────────────┬─────────────────────────────┘
-               │
-               ▼
-┌────────────────────────────────────────────┐
-│  ROUTER                                    │
-│  Loads session state from PostgreSQL       │
-│  Selects target agent                      │
-│  Injects memory context                    │
-│  Dispatches with typed contract            │
-└──────────────┬─────────────────────────────┘
-               │
-        ┌──────┴──────┐
-        ▼             ▼
-  [Agent A]      [Agent B]  ···  [Agent N]
-  Specialized    Specialized
-  prompt +       prompt +
-  tools          tools
-        │             │
-        └──────┬──────┘
-               ▼
-┌────────────────────────────────────────────┐
-│  MEMORY WRITER (PostgreSQL)                │
-│  Saves: message, agent used, result        │
-│  Updates: session state, user preferences  │
-│  Emits: NOTIFY for async post-processing   │
-└──────────────┬─────────────────────────────┘
-               │
-               ▼
-         Telegram API
-         sendMessage()
+```text
+Telegram update
+→ webhook authenticity + update validation
+→ durable dedupe/enqueue
+→ successful acknowledgment
+→ worker
+→ active-session lookup/create
+→ command/callback/session-lock fast path
+→ bounded intent classification only if needed
+→ agent contract
+→ response validation
+→ Telegram send with Retry-After handling
+→ memory/audit writes under retention policy
 ```
 
----
+Do not run a slow LLM call as the only work inside the webhook request path. Telegram can retry unsuccessful/interrupted deliveries; deduplicate using `update_id` before executing expensive work.
 
-## THE THREE CONSTRAINTS YOU CANNOT IGNORE
+## Routing order
 
-Before any architecture decision, internalize these Telegram realities:
+Prefer deterministic routing before an LLM classifier:
 
-### 1. Webhook Delivery Must Be Idempotent
-Telegram can retry webhook delivery after an unsuccessful or interrupted response.
-Do not depend on a universal fixed timeout: return a successful response quickly,
-deduplicate by `update_id`, and process slow LLM work outside the request cycle.
+1. known command;
+2. callback prefix owned by a registered handler;
+3. active flow/session lock;
+4. high-confidence deterministic intent hints;
+5. bounded classifier for ambiguous free text;
+6. orchestrator/fallback.
 
-```python
-# ❌ WRONG — LLM call blocks webhook, causes retries
-@app.post("/telegram/webhook")
-async def webhook(update: dict):
-    response = await llm.generate(update["message"]["text"])  # 5-8 seconds
-    await send_message(response)
-    return {"ok": True}
+Low confidence should not silently become a high-impact action. Ask for clarification or route to a bounded fallback.
 
-# ✅ CORRECT — Acknowledge immediately, process asynchronously
-@app.post("/telegram/webhook")
-async def webhook(update: dict):
-    await job_queue.enqueue(update)   # < 5ms
-    return {"ok": True}              # Return immediately
+## Agent contract
 
-# Worker processes the job outside the webhook cycle
-async def worker():
-    while True:
-        job = await dequeue()
-        response = await llm.generate(job["text"])   # Takes as long as needed
-        await send_message(job["chat_id"], response)
-```
-
-### 2. The 4096 Character Limit
-Every message sent via `sendMessage` has a hard 4096-character cap.
-
-```python
-async def send_safe(chat_id: int, text: str) -> list[dict]:
-    """Split long responses respecting Telegram's limit and word boundaries."""
-    if len(text) <= 4096:
-        return [await send_message(chat_id, text)]
-
-    chunks = []
-    while text:
-        if len(text) <= 4096:
-            chunks.append(text)
-            break
-        # Split at last newline before limit (don't cut mid-sentence)
-        split_at = text[:4096].rfind('\n')
-        if split_at == -1:
-            split_at = text[:4096].rfind(' ')
-        if split_at == -1:
-            split_at = 4096
-        chunks.append(text[:split_at])
-        text = text[split_at:].lstrip()
-
-    results = []
-    for chunk in chunks:
-        results.append(await send_message(chat_id, chunk))
-    return results
-```
-
-### 3. The Rate Limit
-Telegram allows max **30 messages/second** globally and **1 message/second per chat**.
-A busy bot processing messages faster than this will receive 429 errors.
-
-```python
-import asyncio
-from collections import defaultdict, deque
-
-class RateLimiter:
-    def __init__(self):
-        self._locks: dict[int, asyncio.Lock] = defaultdict(asyncio.Lock)
-        self._last_sent: dict[int, float] = {}
-        self._global_lock = asyncio.Lock()
-        self._global_sends: deque[float] = deque()
-
-    async def send(self, chat_id: int, text: str):
-        async with self._locks[chat_id]:
-            loop = asyncio.get_running_loop()
-            now = loop.time()
-            elapsed = now - self._last_sent.get(chat_id, 0)
-            if elapsed < 1.0:
-                await asyncio.sleep(1.0 - elapsed)
-
-            async with self._global_lock:
-                now = loop.time()
-                while self._global_sends and now - self._global_sends[0] >= 1.0:
-                    self._global_sends.popleft()
-                if len(self._global_sends) >= 30:
-                    await asyncio.sleep(1.0 - (now - self._global_sends[0]))
-                    now = loop.time()
-                    while self._global_sends and now - self._global_sends[0] >= 1.0:
-                        self._global_sends.popleft()
-                self._global_sends.append(loop.time())
-
-            await _send_message_api(chat_id, text)
-            self._last_sent[chat_id] = loop.time()
-```
-
----
-
-## POSTGRESQL SCHEMA — THE COMPLETE STATE MACHINE
-
-```sql
--- See references/postgres-schema.md for complete DDL with indexes and RLS
-```
-
-Core tables: `bot_sessions`, `bot_messages`, `bot_agent_registry`,
-`bot_memory`, `bot_job_queue`, `bot_dispatch_log`
-
----
-
-## ROUTING DECISION TREE
-
-```
-Incoming message
-      │
-      ├── Is it a COMMAND? (starts with /)
-      │         │
-      │         ├── Known command → Direct dispatch to registered agent
-      │         └── Unknown command → Error + help menu
-      │
-      ├── Is there an ACTIVE SESSION with locked agent?
-      │         │
-      │         └── Yes → Continue with same agent (multi-turn flow)
-      │
-      ├── Is it a CALLBACK QUERY? (inline keyboard button)
-      │         │
-      │         └── Yes → Dispatch to agent that owns the callback prefix
-      │
-      └── Free text → Intent classification
-                │
-                ├── HIGH confidence (> 0.8) → Dispatch to classified agent
-                ├── MEDIUM confidence (0.5-0.8) → Ask for clarification
-                └── LOW confidence (< 0.5) → Default to orchestrator agent
-```
-
-Full implementation: `references/router-patterns.md`
-
----
-
-## AGENT CONTRACT — THE TYPED INTERFACE
-
-Every agent must implement this interface. Non-negotiable.
+Every agent must expose a narrow interface and explicit capability boundary.
 
 ```python
 from dataclasses import dataclass, field
-from typing import Optional
+from typing import Any
 
-@dataclass
+@dataclass(frozen=True)
 class AgentContext:
+    bot_id: str
     user_id: int
     chat_id: int
     session_id: str
-    session: dict
     message: str
-    recent_history: list[dict]      # Last N messages for context
-    user_memory: list[dict]         # Persistent facts about this user
-    active_flow: Optional[str] = None  # Multi-step flow identifier
+    recent_history: tuple[dict[str, Any], ...] = ()
+    user_memory: tuple[dict[str, Any], ...] = ()
+    active_flow: str | None = None
 
 @dataclass
 class AgentResponse:
-    text: str                        # Response to send to user
-    agent_name: str                  # Which agent produced this
-    memory_writes: list[dict] = field(default_factory=list)
-    lock_session: Optional[str] = None
-    unlock_session: bool = False
-    follow_up_job: Optional[dict] = None
-    flow_state_update: Optional[dict] = None
-
-class AgentBase:
-    name: str
-    description: str                 # Used by LLM orchestrator for routing
-    commands: list[str]              # /commands this agent handles
-    intent_keywords: list[str]       # Keywords for fast-path routing
-    max_context_messages: int = 10   # How much history to load
-
-    async def handle(self, ctx: AgentContext) -> AgentResponse:
-        raise NotImplementedError
-
-    def can_handle(self, message: str) -> float:
-        """Returns confidence 0.0-1.0 that this agent should handle message."""
-        raise NotImplementedError
+    text: str
+    agent_name: str
+    memory_writes: list[dict[str, Any]] = field(default_factory=list)
+    follow_up_job: dict[str, Any] | None = None
+    lock_flow: str | None = None
+    unlock_flow: bool = False
 ```
 
-Full patterns: `references/agent-design.md`
+Tool access is not inherited just because one agent hands work to another. The dispatcher must select an agent and the runtime must enforce that agent's own permissions.
 
----
+## Durable state model
 
-## MEMORY ARCHITECTURE
+The executable PostgreSQL schema is [`schema/telegram_agent_router.sql`](schema/telegram_agent_router.sql).
 
-Two-tier memory model: **Working memory** (session-scoped) + **Long-term memory** (user-scoped).
+Key design choices:
 
-```python
-# Working memory: active in every request, auto-pruned
-# Long-term memory: explicit writes, retrieved semantically
+- `bot_id` scopes every tenant/bot-owned row;
+- RLS policies fail closed when `app.bot_id` is missing;
+- `get_or_create_session()` actually inserts a session when none exists;
+- `update_id` is unique per bot for webhook dedupe;
+- jobs are durable rows claimed with `FOR UPDATE SKIP LOCKED`;
+- messages, memory, jobs and audit rows carry expiration/retention fields where appropriate;
+- long-term memory is explicit, not an automatic dump of every conversation.
 
-async def build_context(
-    user_id: int,
-    chat_id: int,
-    session: dict,
-    message: str,
-) -> AgentContext:
-    async with pool.acquire() as conn:
-        # Working memory: last N messages this session
-        history = await conn.fetch("""
-            SELECT role, content, agent_name, created_at
-            FROM bot_messages
-            WHERE session_id = $1
-            ORDER BY created_at DESC
-            LIMIT $2
-        """, session["id"], CONTEXT_WINDOW_MESSAGES)
+PostgreSQL suitability still depends on measured workload. A durable broker/stream or external store remains justified when required semantics or isolation exceed the PostgreSQL design.
 
-        # Long-term memory: relevant facts about user
-        memories = await conn.fetch("""
-            SELECT key, value, confidence
-            FROM bot_memory
-            WHERE user_id = $1
-              AND (expires_at IS NULL OR expires_at > NOW())
-            ORDER BY accessed_at DESC
-            LIMIT 20
-        """, user_id)
+## Telegram message limits and flood control
 
-        return AgentContext(
-            user_id=user_id,
-            chat_id=chat_id,
-            session_id=session["id"],
-            session=session,
-            message=message,
-            recent_history=[dict(r) for r in reversed(history)],
-            user_memory=[dict(m) for m in memories],
-            active_flow=session.get("locked_flow"),
-        )
-```
+Do not hard-code one universal “30 messages/sec” limiter for all traffic classes.
 
-Full schema and retrieval patterns: `references/postgres-schema.md`
+Current Telegram guidance distinguishes at least:
 
----
+- single-chat pacing — avoid sustained rates above roughly one message per second;
+- groups — tighter per-minute limits apply;
+- bulk notifications — free broadcast throughput is around tens of messages per second;
+- paid broadcasts — eligible bots can obtain higher broadcast throughput.
 
-## CONTEXT COMPRESSION FOR LONG CONVERSATIONS
+Always honor API `429` responses and `retry_after`. Treat numeric platform limits as upstream facts that can change; see [`references/telegram-constraints.md`](references/telegram-constraints.md) and `VERIFICATION.md`.
 
-When history exceeds the LLM context window:
+## Long responses
 
-```python
-async def compress_history(user_id: int, session_id: str, conn, llm) -> str | None:
-    """Summarize old messages to stay within context limits."""
-    old_messages = await conn.fetch("""
-        SELECT role, content FROM bot_messages
-        WHERE session_id = $1
-          AND created_at < NOW() - INTERVAL '1 hour'
-        ORDER BY created_at
-        LIMIT 50
-    """, session_id)
+`sendMessage` accepts text up to the Bot API's documented character limit. Chunk only at safe boundaries and validate after entity parsing/formatting. The executable reference implementation includes a deterministic splitter in [`examples/router_contract.py`](examples/router_contract.py).
 
-    if not old_messages:
-        return None
+For supported private-chat scenarios, Telegram also exposes draft-streaming methods such as `sendMessageDraft`. Treat draft streaming as optional UX; the durable final message still follows the normal send path and current upstream constraints must be checked.
 
-    summary = await llm.generate(
-        system="Summarize this conversation history in 3-5 bullet points. "
-               "Focus on decisions made, facts learned, tasks completed.",
-        user="\n".join(f"{m['role']}: {m['content']}" for m in old_messages)
-    )
+## Memory and privacy
 
-    # Store summary, mark originals as compressed
-    await conn.execute("""
-        INSERT INTO bot_memory (user_id, key, value, confidence)
-        VALUES ($1, 'conversation_summary_' || $2, $3, 0.9)
-        ON CONFLICT (user_id, key) DO UPDATE SET value = EXCLUDED.value
-    """, user_id, session_id[:8], summary)
+Conversation content, user IDs, inferred preferences and dispatch logs can be personal data.
 
-    await conn.execute("""
-        UPDATE bot_messages SET compressed = true
-        WHERE session_id = $1 AND created_at < NOW() - INTERVAL '1 hour'
-    """, session_id)
+- collect only what the product needs;
+- separate short-lived session context from deliberate long-term memory;
+- attach source/confidence to inferred memory;
+- define expiration/retention instead of “forever” by default;
+- test RLS through a non-bypass application role;
+- do not place secrets or full credentials in memory/audit text;
+- support deletion/export obligations required by the product's jurisdiction and policy.
 
-    return summary
-```
+## Failure handling
 
----
+A production-capable design needs more than a queue table:
 
-## PRODUCTION CHECKLIST
+- idempotency for incoming updates and downstream side effects;
+- retry budget and `retry_after` support;
+- processing timeout/reaper for abandoned jobs;
+- dead-letter/failure inspection;
+- bounded context size;
+- explicit handling of partial Telegram sends;
+- observability for route reason, confidence, latency, retries and failures.
 
-Before going live with a multi-agent Telegram bot:
+## Verification workflow
 
-```
-Webhook
-□ Webhook URL uses HTTPS (required by Telegram)
-□ Secret token validated on every request
-□ HTTP 200 returned in < 500ms (job queued, not processed)
-□ Update ID deduplicated (Telegram may send duplicates on retry)
-□ Webhook registered with setWebhook (verify with getWebhookInfo)
+Before claiming the architecture works:
 
-Routing
-□ All /commands registered in agent registry
-□ Fallback agent defined for unmatched intent
-□ Confidence threshold tuned (0.6-0.8 is typical sweet spot)
-□ Multi-turn session lock has a max TTL (prevent stuck sessions)
+1. `python scripts/validate_markdown.py`
+2. `python scripts/validate_skill.py`
+3. `python -m unittest discover -s tests -p 'test_*.py'`
+4. run `schema/telegram_agent_router.sql` and `tests/runtime.sql` against PostgreSQL 18 or the production target major;
+5. inspect current Telegram Bot API/FAQ for time-sensitive limits;
+6. classify untested target-bot behavior as `NOT_PROVEN`.
 
-Memory
-□ Long-term memory has TTL or explicit expiry
-□ Compression runs for sessions > N messages
-□ Sensitive data not stored in plaintext memory
+## References
 
-Production
-□ Connection pool sized correctly (not > PG max_connections / 3)
-□ Rate limiter active (1 msg/sec per chat, 30/sec global)
-□ Retry logic with exponential backoff on Telegram API errors
-□ Dead letter queue for failed jobs
-□ Dispatch log for debugging routing decisions
-```
-
----
-
-*See `references/` for complete implementations:*
-- `postgres-schema.md` — Full DDL, indexes, RLS policies
-- `router-patterns.md` — Intent classifier, dispatch engine, session FSM
-- `agent-design.md` — Agent contracts, specialization principles, handoff
-- `telegram-constraints.md` — Webhook patterns, rate limiting, message splitting
-- `anti-patterns.md` — 8 production failures and their fixes
+- Current Telegram constraints: [`references/telegram-constraints.md`](references/telegram-constraints.md)
+- Agent design patterns: [`references/agent-design.md`](references/agent-design.md)
+- Router patterns: [`references/router-patterns.md`](references/router-patterns.md)
+- Anti-patterns: [`references/anti-patterns.md`](references/anti-patterns.md)
+- Privacy/security model: [`references/privacy-security.md`](references/privacy-security.md)
+- Preserved pre-refactor skill: [`references/SKILL.pre-2026-08-15.md`](references/SKILL.pre-2026-08-15.md)
+- Verification matrix: [`VERIFICATION.md`](VERIFICATION.md)
+- Evals: [`evals/cases.jsonl`](evals/cases.jsonl)
