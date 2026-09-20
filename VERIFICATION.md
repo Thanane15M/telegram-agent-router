@@ -1,6 +1,6 @@
 # Verification matrix
 
-Last evidence review: **2026-08-15**.
+Last evidence review: **2026-09-20**. Reviewed Telegram release: **Bot API 10.3 (2026-08-24)**.
 
 | Claim | Status | Evidence / boundary |
 |---|---|---|
@@ -9,6 +9,7 @@ Last evidence review: **2026-08-15**.
 | Single-chat sustained sends should stay around <=1 msg/s; groups <=20/min; free bulk around 30/s | VERIFIED as current platform guidance | Current Telegram Bots FAQ; treat as time-sensitive and honor 429 `retry_after`. |
 | Paid broadcasts can provide higher bulk throughput | VERIFIED at high level | Current Telegram Bots FAQ; eligibility/cost details are intentionally not hard-coded here. |
 | `sendMessageDraft` exists for generated partial-message UX | VERIFIED | Current Telegram Bot API; use is optional and time-sensitive. |
+| Bot API 10.3 permits bot-to-bot messaging by username when both bots enable bot-to-bot communication | VERIFIED current platform capability | Telegram Bot API 10.3 changelog. A target deployment's peer allowlist, loop budget and runtime behavior remain NOT_PROVEN here. |
 | Historical “Get or create active session” SQL created a session | REJECTED | Previous reference only updated an existing row. Canonical `get_or_create_session()` now inserts when none exists. |
 | Canonical schema enforces bot scoping through RLS | VERIFIED_IN_CI when green | `schema/telegram_agent_router.sql` + `tests/runtime.sql` under a non-bypass role. |
 | Queue claim uses PostgreSQL `FOR UPDATE SKIP LOCKED` | VERIFIED_IN_CI when green | Canonical function + PostgreSQL 18 runtime test. |
@@ -18,6 +19,7 @@ Last evidence review: **2026-08-15**.
 ## Authoritative upstream references
 
 - Telegram Bot API: `https://core.telegram.org/bots/api`
+- Telegram Bot API changelog: `https://core.telegram.org/bots/api-changelog`
 - Telegram Bots FAQ: `https://core.telegram.org/bots/faq`
 - PostgreSQL 18 row locking / `SKIP LOCKED`: `https://www.postgresql.org/docs/18/sql-select.html`
 - PostgreSQL RLS: `https://www.postgresql.org/docs/18/ddl-rowsecurity.html`
@@ -26,8 +28,9 @@ Last evidence review: **2026-08-15**.
 
 Re-check time-sensitive facts when:
 
-- Telegram Bot API or FAQ changes;
-- message/draft/rate-limit behavior changes;
+- `UPSTREAM_BOT_API_VERSION` differs from the newest version advertised by the official Telegram changelog;
+- Telegram Bot API or FAQ changes a marker used by `scripts/check_upstream_drift.py`;
+- message/draft/rate-limit or bot-to-bot behavior changes;
 - PostgreSQL major version changes;
 - RLS/session/job schema changes;
 - routing confidence thresholds or agent capability boundaries change.
