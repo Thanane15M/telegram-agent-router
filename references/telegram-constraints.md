@@ -1,6 +1,6 @@
 # Telegram constraints — current reference
 
-Last evidence review: **2026-08-15**. Platform limits are time-sensitive; verify the current Bot API and Bots FAQ before hard-coding them.
+Last evidence review: **2026-09-20**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
 
 ## Webhook delivery
 
@@ -9,6 +9,20 @@ Last evidence review: **2026-08-15**. Platform limits are time-sensitive; verify
 - Use `setWebhook.secret_token` and compare the `X-Telegram-Bot-Api-Secret-Token` header without logging the secret.
 - Restrict `allowed_updates` to update types the bot actually handles.
 - A retry-safe intake path must not double-charge, double-send, or repeat side effects when Telegram redelivers an update.
+
+## Bot-to-bot communication
+
+Bot API 10.3 added the ability to send messages to other bots by username when both bots have enabled bot-to-bot communication. Do not rely on older assumptions that bots can never exchange messages.
+
+If bot-to-bot communication is not required, keep it disabled. If it is intentionally enabled, treat loop prevention as an application invariant:
+
+- allow only explicitly configured peer bots;
+- preserve durable idempotency for each accepted update and downstream side effect;
+- enforce bounded interaction depth/time or an equivalent loop budget;
+- do not let a model expand the peer allowlist or interaction budget by itself;
+- keep routing/audit records sufficient to identify repeated bot-to-bot cycles without storing secrets.
+
+This repository does **not** prove a particular production bot-to-bot deployment; such behavior remains `NOT_PROVEN` until exercised in the target environment.
 
 ## Text size
 
@@ -81,6 +95,7 @@ When message formatting fails, do not silently drop the response; log the error 
 ## Source links
 
 - Bot API: `https://core.telegram.org/bots/api`
+- Bot API changelog: `https://core.telegram.org/bots/api-changelog`
 - Bots FAQ: `https://core.telegram.org/bots/faq`
 
 The pre-2026-08-15 constraints document is preserved at `telegram-constraints.pre-2026-08-15.md`.
