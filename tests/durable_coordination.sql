@@ -70,7 +70,14 @@ BEGIN
       'bot-a',
       'alpha',
       'beta',
-      :'alpha_exec'::uuid,
+      (
+        SELECT execution_id
+        FROM telegram_agent.agent_executions
+        WHERE bot_id='bot-a' AND agent_id='alpha'
+          AND status='active' AND lease_expires_at > now()
+        ORDER BY started_at DESC
+        LIMIT 1
+      ),
       'proactive',
       '11111111-1111-1111-1111-111111111111'::uuid,
       NULL,
@@ -174,7 +181,21 @@ DO $$
 BEGIN
   BEGIN
     PERFORM telegram_agent.mark_agent_message_delivered(
-      'bot-a', :'msg2'::uuid, :'beta_exec2'::uuid, interval '30 seconds'
+      'bot-a',
+      (
+        SELECT message_id
+        FROM telegram_agent.agent_messages
+        WHERE bot_id='bot-a' AND sender_agent='alpha' AND idempotency_key='msg-2'
+      ),
+      (
+        SELECT execution_id
+        FROM telegram_agent.agent_executions
+        WHERE bot_id='bot-a' AND agent_id='beta'
+          AND status='active'
+        ORDER BY started_at DESC
+        LIMIT 1
+      ),
+      interval '30 seconds'
     );
     RAISE EXCEPTION 'stale execution completed a handoff';
   EXCEPTION WHEN SQLSTATE '55000' THEN
