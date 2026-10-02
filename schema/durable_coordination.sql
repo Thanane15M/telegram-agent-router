@@ -335,7 +335,6 @@ BEGIN
 
   IF FOUND THEN
     IF v_message.recipient_agent <> p_recipient_agent
-       OR v_message.sender_execution_id <> p_sender_execution_id
        OR v_message.provenance <> p_provenance
        OR v_message.request_id <> p_request_id
        OR v_message.response_to IS DISTINCT FROM p_response_to
@@ -516,7 +515,9 @@ BEGIN
   END IF;
 
   IF v_message.status <> 'delivered'
-     OR v_message.reserved_by_execution_id <> p_execution_id THEN
+     OR v_message.reserved_by_execution_id <> p_execution_id
+     OR v_message.reservation_expires_at IS NULL
+     OR v_message.reservation_expires_at <= now() THEN
     RAISE EXCEPTION 'message cannot be acknowledged by this execution'
       USING ERRCODE = '55000';
   END IF;
