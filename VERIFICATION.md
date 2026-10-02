@@ -1,6 +1,6 @@
 # Verification matrix
 
-Last evidence review: **2026-09-20**. Reviewed Telegram release: **Bot API 10.3 (2026-08-24)**.
+Last evidence review: **2026-10-02**. Reviewed Telegram release: **Bot API 10.3 (2026-08-24)**.
 
 | Claim | Status | Evidence / boundary |
 |---|---|---|
@@ -13,6 +13,9 @@ Last evidence review: **2026-09-20**. Reviewed Telegram release: **Bot API 10.3 
 | Historical “Get or create active session” SQL created a session | REJECTED | Previous reference only updated an existing row. Canonical `get_or_create_session()` now inserts when none exists. |
 | Canonical schema enforces bot scoping through RLS | VERIFIED_IN_CI when green | `schema/telegram_agent_router.sql` + `tests/runtime.sql` under a non-bypass role. |
 | Queue claim uses PostgreSQL `FOR UPDATE SKIP LOCKED` | VERIFIED_IN_CI when green | Canonical function + PostgreSQL 18 runtime test. |
+| Expired processing leases are reaped to `retrying` or terminal `failed`, and a reaped job can be reclaimed by a new worker | VERIFIED_IN_CI when green | `schema/durable_coordination.sql` + `tests/durable_coordination.sql` on PostgreSQL 18. |
+| Agent-to-agent message retries are payload-aware idempotent; reservations/redelivery preserve first delivery; ACK is idempotent and stale executions are rejected | VERIFIED_IN_CI when green | `tests/durable_coordination.sql`; scope is the PostgreSQL coordination contract, not network transport delivery. |
+| Reply-linked, proactive and scheduled provenance are represented separately | VERIFIED_IN_CI when green | Schema check + runtime reply correlation test; application routing policy still determines which outbound actions are permitted. |
 | A specific production bot meets throughput/latency/recovery/privacy requirements | NOT_PROVEN by this repository | Requires target environment, workload, legal policy and end-to-end runtime evidence. |
 | An LLM classifier may authorize privileged actions by itself | REJECTED | Routing output selects a bounded agent; runtime policy/human gates authorize sensitive capabilities. |
 
@@ -23,6 +26,7 @@ Last evidence review: **2026-09-20**. Reviewed Telegram release: **Bot API 10.3 
 - Telegram Bots FAQ: `https://core.telegram.org/bots/faq`
 - PostgreSQL 18 row locking / `SKIP LOCKED`: `https://www.postgresql.org/docs/18/sql-select.html`
 - PostgreSQL RLS: `https://www.postgresql.org/docs/18/ddl-rowsecurity.html`
+- Comparative durable coordination design input reviewed 2026-10-02: `https://github.com/october-dev/october-bus` (design evidence only; no runtime dependency or copied implementation)
 
 ## Re-verification triggers
 
