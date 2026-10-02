@@ -64,3 +64,5 @@ jobs:
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema/telegram_agent_router.sql
       - name: Run RLS/session/dedupe/job runtime assertions
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/runtime.sql
+      - name: Prove durable coordination and lease recovery
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/durable_coordination.sql
