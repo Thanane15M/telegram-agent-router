@@ -8,6 +8,7 @@ The project separates documentation from executable evidence:
 
 - `SKILL.md` — concise routing/architecture guidance.
 - `schema/telegram_agent_router.sql` — executable PostgreSQL schema with multi-bot scoping, RLS, real session get-or-create and durable jobs.
+- `schema/durable_coordination.sql` — optional additive extension for execution leases, abandoned-job reaping and durable agent-to-agent reservation/delivery/ACK semantics.
 - `examples/router_contract.py` — deterministic message chunking and routing primitives.
 - `tests/` — Python contract tests plus PostgreSQL runtime checks.
 - `evals/cases.jsonl` — behavioral evals for agent routing decisions.
@@ -46,6 +47,7 @@ With PostgreSQL 18 available:
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema/telegram_agent_router.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/runtime.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/durable_coordination.sql
 ```
 
 GitHub Actions performs the same gates on pushes and pull requests.
