@@ -101,6 +101,20 @@ Key design choices:
 
 PostgreSQL suitability still depends on measured workload. A durable broker/stream or external store remains justified when required semantics or isolation exceed the PostgreSQL design.
 
+### Optional durable agent-to-agent coordination
+
+When specialists must exchange work reliably across process restarts, keep logical agent identity separate from the current execution lease. Apply [`schema/durable_coordination.sql`](schema/durable_coordination.sql) after the base schema to add:
+
+- execution-scoped authority with expiring heartbeats;
+- payload-aware idempotency using a stable key plus payload digest;
+- explicit request/reply correlation;
+- inbox reservation, delivery, acknowledgement and redelivery;
+- ACK only after successful handoff;
+- stale-execution rejection;
+- processing leases and a reaper for abandoned Telegram jobs.
+
+The delivery contract is at-least-once until acknowledgement. A peer request never expands the receiving agent's own capability boundary. Proactive/scheduled sends are distinct from reply-linked sends; do not apply reply-only freshness guards to unrelated outbound work.
+
 ## Telegram message limits and flood control
 
 Do not hard-code one universal “30 messages/sec” limiter for all traffic classes.
@@ -138,7 +152,9 @@ A production-capable design needs more than a queue table:
 
 - idempotency for incoming updates and downstream side effects;
 - retry budget and `retry_after` support;
-- processing timeout/reaper for abandoned jobs;
+- processing timeout/reaper for abandoned jobs, with explicit worker ownership and lease expiry;
+- redelivery of unacknowledged agent-to-agent work without rewriting first-delivery history;
+- stale execution invalidation so a dead/replaced agent process cannot ACK or complete new work;
 - dead-letter/failure inspection;
 - bounded context size;
 - explicit handling of partial Telegram sends;
