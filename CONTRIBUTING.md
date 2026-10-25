@@ -26,7 +26,10 @@ With PostgreSQL 18:
 ```bash
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema/telegram_agent_router.sql
 psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/runtime.sql
+psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/durable_coordination.sql
 ```
+
+**Safety:** Run these SQL tests only against a disposable PostgreSQL 18 test database. They create and modify fixtures; never point `DATABASE_URL` at production.
 
 ## Claim discipline
 
