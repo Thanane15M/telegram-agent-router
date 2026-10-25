@@ -1,6 +1,6 @@
 # Verification matrix
 
-Last evidence review: **2026-10-02**. Reviewed Telegram release: **Bot API 10.3 (2026-08-24)**.
+Last evidence review: **2026-10-25**. Reviewed latest Telegram release: **Bot API 10.3 (2026-08-24)**.
 
 | Claim | Status | Evidence / boundary |
 |---|---|---|
@@ -10,6 +10,8 @@ Last evidence review: **2026-10-02**. Reviewed Telegram release: **Bot API 10.3 
 | Paid broadcasts can provide higher bulk throughput | VERIFIED at high level | Current Telegram Bots FAQ; eligibility/cost details are intentionally not hard-coded here. |
 | `sendMessageDraft` exists for generated partial-message UX | VERIFIED | Current Telegram Bot API; use is optional and time-sensitive. |
 | Bot API 10.3 permits bot-to-bot messaging by username when both bots enable bot-to-bot communication | VERIFIED current platform capability | Telegram Bot API 10.3 changelog. A target deployment's peer allowlist, loop budget and runtime behavior remain NOT_PROVEN here. |
+| Bot API 10.2 (2026-07-14) introduced ephemeral messages, `ephemeral_message_id` and separate edit/delete/reply methods | VERIFIED upstream; repository integration NOT_PROVEN | Official Telegram Bot API changelog. Webhook `update_id` remains the dedupe key; stored message identity and API helpers require distinct regular/ephemeral handling and tests (issue #10). |
+| Bot API 10.3 (2026-08-24) replaced the original `receiver_user_id`/`callback_query_id` send parameters with `ephemeral_message_parameters` | VERIFIED upstream; repository integration NOT_PROVEN | Official Telegram Bot API changelog. Do not infer support from a generic nullable `telegram_msg_id`. |
 | Historical “Get or create active session” SQL created a session | REJECTED | Previous reference only updated an existing row. Canonical `get_or_create_session()` now inserts when none exists. |
 | Canonical schema enforces bot scoping through RLS | VERIFIED_IN_CI when green | `schema/telegram_agent_router.sql` + `tests/runtime.sql` under a non-bypass role. |
 | Queue claim uses PostgreSQL `FOR UPDATE SKIP LOCKED` | VERIFIED_IN_CI when green | Canonical function + PostgreSQL 18 runtime test. |
