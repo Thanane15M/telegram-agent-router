@@ -44,6 +44,8 @@ CREATE TABLE IF NOT EXISTS telegram_agent.messages (
   user_id bigint NOT NULL,
   chat_id bigint NOT NULL,
   telegram_msg_id bigint,
+  ephemeral_message_id bigint,
+  CONSTRAINT messages_one_telegram_identity CHECK (telegram_msg_id IS NULL OR ephemeral_message_id IS NULL),
   role text NOT NULL CHECK (role IN ('user','assistant','system')),
   content text NOT NULL,
   agent_name text,
@@ -55,6 +57,9 @@ CREATE TABLE IF NOT EXISTS telegram_agent.messages (
 CREATE UNIQUE INDEX IF NOT EXISTS messages_telegram_dedupe_idx
   ON telegram_agent.messages (bot_id, chat_id, telegram_msg_id)
   WHERE telegram_msg_id IS NOT NULL;
+CREATE UNIQUE INDEX IF NOT EXISTS messages_ephemeral_dedupe_idx
+  ON telegram_agent.messages (bot_id, chat_id, ephemeral_message_id)
+  WHERE ephemeral_message_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS messages_session_idx
   ON telegram_agent.messages (bot_id, session_id, created_at DESC);
 CREATE INDEX IF NOT EXISTS messages_expiry_idx
