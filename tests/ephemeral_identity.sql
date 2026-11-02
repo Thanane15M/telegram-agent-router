@@ -36,7 +36,7 @@ BEGIN
     INSERT INTO telegram_agent.messages
       (bot_id, session_id, user_id, chat_id, telegram_msg_id, ephemeral_message_id, role, content)
     VALUES
-      ('ephemeral-test-bot', :'test_session_id', 1001, 2001, 11, 12, 'user', 'invalid');
+      ('ephemeral-test-bot', (SELECT id FROM telegram_agent.sessions WHERE bot_id='ephemeral-test-bot' AND user_id=1001 AND chat_id=2001 ORDER BY started_at DESC LIMIT 1), 1001, 2001, 11, 12, 'user', 'invalid');
     RAISE EXCEPTION 'mixed regular/ephemeral identity unexpectedly accepted';
   EXCEPTION
     WHEN check_violation THEN NULL;
@@ -49,7 +49,7 @@ BEGIN
     INSERT INTO telegram_agent.messages
       (bot_id, session_id, user_id, chat_id, ephemeral_message_id, role, content)
     VALUES
-      ('ephemeral-test-bot', :'test_session_id', 1001, 2001, 10, 'user', 'duplicate ephemeral');
+      ('ephemeral-test-bot', (SELECT id FROM telegram_agent.sessions WHERE bot_id='ephemeral-test-bot' AND user_id=1001 AND chat_id=2001 ORDER BY started_at DESC LIMIT 1), 1001, 2001, 10, 'user', 'duplicate ephemeral');
     RAISE EXCEPTION 'duplicate ephemeral identity unexpectedly accepted';
   EXCEPTION
     WHEN unique_violation THEN NULL;
