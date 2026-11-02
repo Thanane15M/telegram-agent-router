@@ -1,6 +1,6 @@
 # Telegram constraints — current reference
 
-Last evidence review: **2026-09-20**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
+Last evidence review: **2026-10-25**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
 
 ## Webhook delivery
 
@@ -23,6 +23,12 @@ If bot-to-bot communication is not required, keep it disabled. If it is intentio
 - keep routing/audit records sufficient to identify repeated bot-to-bot cycles without storing secrets.
 
 This repository does **not** prove a particular production bot-to-bot deployment; such behavior remains `NOT_PROVEN` until exercised in the target environment.
+
+## Ephemeral message identity (compatibility not implemented)
+
+Bot API **10.2 (2026-07-14)** introduced ephemeral messages, `ephemeral_message_id`, an optional regular `message_id` in reply parameters when the ephemeral identifier is present, and dedicated ephemeral edit/delete methods. Bot API **10.3 (2026-08-24)** then replaced the initial `receiver_user_id`/`callback_query_id` send-method parameters with `ephemeral_message_parameters`.
+
+Keep regular and ephemeral message identifiers in separate typed identity families. Webhook intake must still deduplicate on `(bot_id, update_id)`; a nullable ordinary `telegram_msg_id` alone is **not** proof of ephemeral support. Before documenting executable integration, add official-shape fixtures, explicit routing/edit/delete/reply selection tests and an additive migration if required. This repository does **not** yet prove ephemeral support in its SQL schema, application helpers or any deployed bot; status **NOT_PROVEN**. Track implementation in [issue #10](https://github.com/Thanane15M/telegram-agent-router/issues/10).
 
 ## Text size
 
