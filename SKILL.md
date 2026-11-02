@@ -95,6 +95,7 @@ Key design choices:
 - RLS policies fail closed when `app.bot_id` is missing;
 - `get_or_create_session()` actually inserts a session when none exists;
 - `update_id` is unique per bot for webhook dedupe;
+- stored regular `telegram_msg_id` and `ephemeral_message_id` are distinct identity families and must never be conflated;
 - jobs are durable rows claimed with `FOR UPDATE SKIP LOCKED`;
 - messages, memory, jobs and audit rows carry expiration/retention fields where appropriate;
 - long-term memory is explicit, not an automatic dump of every conversation.

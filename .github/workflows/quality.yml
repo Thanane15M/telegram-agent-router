@@ -62,6 +62,8 @@ jobs:
           sudo apt-get install -y postgresql-client
       - name: Apply canonical schema
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f schema/telegram_agent_router.sql
+      - name: Prove regular and ephemeral message identity separation
+        run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/ephemeral_identity.sql
       - name: Run RLS/session/dedupe/job runtime assertions
         run: psql "$DATABASE_URL" -v ON_ERROR_STOP=1 -f tests/runtime.sql
       - name: Prove durable coordination and lease recovery
