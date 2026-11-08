@@ -1,6 +1,6 @@
 # Telegram constraints — current reference
 
-Last evidence review: **2026-10-25**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
+Last evidence review: **2026-11-08**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
 
 ## Webhook delivery
 
@@ -12,7 +12,7 @@ Last evidence review: **2026-10-25**. Reviewed upstream release: **Telegram Bot 
 
 ## Bot-to-bot communication
 
-Bot API 10.3 added the ability to send messages to other bots by username when both bots have enabled bot-to-bot communication. Do not rely on older assumptions that bots can never exchange messages.
+Bot API 10.0 (2026-05-08) introduced the ability to send messages to other bots by username when both bots have enabled bot-to-bot communication. Do not rely on older assumptions that bots can never exchange messages.
 
 If bot-to-bot communication is not required, keep it disabled. If it is intentionally enabled, treat loop prevention as an application invariant:
 

@@ -1,6 +1,6 @@
 # Verification matrix
 
-Last evidence review: **2026-10-25**. Reviewed latest Telegram release: **Bot API 10.3 (2026-08-24)**.
+Last evidence review: **2026-11-08**. Reviewed latest Telegram release: **Bot API 10.3 (2026-08-24)**.
 
 | Claim | Status | Evidence / boundary |
 |---|---|---|
@@ -9,7 +9,7 @@ Last evidence review: **2026-10-25**. Reviewed latest Telegram release: **Bot AP
 | Single-chat sustained sends should stay around <=1 msg/s; groups <=20/min; free bulk around 30/s | VERIFIED as current platform guidance | Current Telegram Bots FAQ; treat as time-sensitive and honor 429 `retry_after`. |
 | Paid broadcasts can provide higher bulk throughput | VERIFIED at high level | Current Telegram Bots FAQ; eligibility/cost details are intentionally not hard-coded here. |
 | `sendMessageDraft` exists for generated partial-message UX | VERIFIED | Current Telegram Bot API; use is optional and time-sensitive. |
-| Bot API 10.3 permits bot-to-bot messaging by username when both bots enable bot-to-bot communication | VERIFIED current platform capability | Telegram Bot API 10.3 changelog. A target deployment's peer allowlist, loop budget and runtime behavior remain NOT_PROVEN here. |
+| Bot API 10.0 (2026-05-08) introduced bot-to-bot messaging by username when both bots enable bot-to-bot communication | VERIFIED upstream; target deployment NOT_PROVEN | Official Telegram Bot API 10.0 changelog; peer allowlists, loop control and target runtime remain untested. A target deployment's peer allowlist, loop budget and runtime behavior remain NOT_PROVEN here. |
 | Bot API 10.2 (2026-07-14) introduced ephemeral messages, `ephemeral_message_id` and separate edit/delete/reply methods | VERIFIED upstream; identity separation VERIFIED_IN_CI when green | Official Telegram Bot API changelog + `tests/ephemeral_identity.sql`. Webhook `update_id` remains the intake dedupe key. This repository proves distinct storage identity only; target-bot ephemeral behavior remains NOT_PROVEN. |
 | Bot API 10.3 (2026-08-24) replaced the original `receiver_user_id`/`callback_query_id` send parameters with `ephemeral_message_parameters` | VERIFIED upstream; storage identity VERIFIED_IN_CI when green | Official Telegram Bot API changelog + additive `schema/ephemeral_messages_10_2.sql`. Send/edit/delete/reply API behavior for a target bot remains NOT_PROVEN. |
 | Historical “Get or create active session” SQL created a session | REJECTED | Previous reference only updated an existing row. Canonical `get_or_create_session()` now inserts when none exists. |
