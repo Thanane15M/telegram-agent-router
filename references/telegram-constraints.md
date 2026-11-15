@@ -1,6 +1,6 @@
 # Telegram constraints — current reference
 
-Last evidence review: **2026-10-25**. Reviewed upstream release: **Telegram Bot API 10.3 (2026-08-24)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
+Last evidence review: **2026-11-15**. Reviewed upstream release: **Telegram Bot API 10.4 (2026-11-09)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
 
 ## Webhook delivery
 
@@ -12,7 +12,7 @@ Last evidence review: **2026-10-25**. Reviewed upstream release: **Telegram Bot 
 
 ## Bot-to-bot communication
 
-Bot API 10.3 added the ability to send messages to other bots by username when both bots have enabled bot-to-bot communication. Do not rely on older assumptions that bots can never exchange messages.
+Bot API 10.0 (2026-05-08) introduced the ability to send messages to other bots by username when both bots have enabled bot-to-bot communication. Do not rely on older assumptions that bots can never exchange messages.
 
 If bot-to-bot communication is not required, keep it disabled. If it is intentionally enabled, treat loop prevention as an application invariant:
 
@@ -24,11 +24,17 @@ If bot-to-bot communication is not required, keep it disabled. If it is intentio
 
 This repository does **not** prove a particular production bot-to-bot deployment; such behavior remains `NOT_PROVEN` until exercised in the target environment.
 
-## Ephemeral message identity (compatibility not implemented)
+## Ephemeral message identity (storage verified in CI, sending not proven)
 
 Bot API **10.2 (2026-07-14)** introduced ephemeral messages, `ephemeral_message_id`, an optional regular `message_id` in reply parameters when the ephemeral identifier is present, and dedicated ephemeral edit/delete methods. Bot API **10.3 (2026-08-24)** then replaced the initial `receiver_user_id`/`callback_query_id` send-method parameters with `ephemeral_message_parameters`.
 
-Keep regular and ephemeral message identifiers in separate typed identity families. Webhook intake must still deduplicate on `(bot_id, update_id)`; a nullable ordinary `telegram_msg_id` alone is **not** proof of ephemeral support. Before documenting executable integration, add official-shape fixtures, explicit routing/edit/delete/reply selection tests and an additive migration if required. This repository does **not** yet prove ephemeral support in its SQL schema, application helpers or any deployed bot; status **NOT_PROVEN**. Track implementation in [issue #10](https://github.com/Thanane15M/telegram-agent-router/issues/10).
+Keep regular and ephemeral message identifiers in separate typed identity families. Webhook intake must still deduplicate on `(bot_id, update_id)`; a nullable ordinary `telegram_msg_id` alone is **not** proof of ephemeral support. Before documenting executable integration, add official-shape fixtures, explicit routing/edit/delete/reply selection tests and an additive migration if required. The additive `schema/ephemeral_messages_10_2.sql` and `tests/ephemeral_identity.sql` prove distinct storage identity when the exact-sha PostgreSQL CI check succeeds. Actual send/edit/delete/reply behavior and target deployments remain **NOT_PROVEN**.
+
+Bot API **10.4 (2026-11-09)** allows an ephemeral callback reply to use `callback_query_id` without `receiver_user_id` in chats other than channel direct-message chats; `chat_id` is now optional for these send calls. No executable send-path support is claimed. Before implementing, add fixtures for optional identifiers, the excluded chat category, and authorization/recipient scoping; do not treat a callback ID as a durable message identifier.
+
+## Widget updates (10.4)
+
+Telegram added `widget_query` and `shared_widget_query` update types. Do not grant capabilities from widget-supplied content or wallet/card data: treat it as untrusted input and validate origin, permissions and transaction state independently. This repository has no verified widget handler.
 
 ## Text size
 
