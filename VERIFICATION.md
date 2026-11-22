@@ -1,6 +1,6 @@
 # Verification matrix
 
-Last evidence review: **2026-11-15**. Reviewed latest Telegram release: **Bot API 10.4 (2026-11-09)**.
+Last evidence review: **2026-11-22**. Reviewed latest Telegram release: **Bot API 10.5 (2026-11-22)**.
 
 | Claim | Status | Evidence / boundary |
 |---|---|---|
@@ -14,6 +14,8 @@ Last evidence review: **2026-11-15**. Reviewed latest Telegram release: **Bot AP
 | Bot API 10.3 (2026-08-24) replaced the original `receiver_user_id`/`callback_query_id` send parameters with `ephemeral_message_parameters` | VERIFIED upstream; storage identity VERIFIED_IN_CI when green | Official Telegram Bot API changelog + additive `schema/ephemeral_messages_10_2.sql`. Send/edit/delete/reply API behavior for a target bot remains NOT_PROVEN. |
 | Bot API 10.4 (2026-11-09) allows ephemeral callback replies without `receiver_user_id` in most chats, and makes `chat_id` optional for those send calls | VERIFIED upstream; target send-path NOT_PROVEN | Official changelog. The SQL message identity checks do not validate callback routing, optional field handling, or sending; add fixtures before implementing. Channel direct-message chats are excluded. |
 | Bot API 10.4 introduces `widget_query` and `shared_widget_query` Update variants | VERIFIED upstream; processing NOT_PROVEN | Treat widget-origin data and wallet/card payloads as untrusted; do not grant permissions or infer payment confirmation from an unvalidated update. No widget handler is claimed. |
+| Bot API 10.5 (2026-11-22) adds `setMySettings` and optional callback-query delivery using `inline_message_id` instead of `message`, based on `callback_query_mode` | VERIFIED upstream; callback dispatch NOT_PROVEN | Official changelog. Treat callback payloads and missing `message` conservatively; explicit settings changes can affect privacy, inline mode and group availability. No target integration is claimed. |
+| Bot API 10.5 changes `getMe` return type to `BotFullInfo` and replaces `RichBlockExpandableBlockQuotation.text` with `blocks` | VERIFIED upstream; parsing compatibility NOT_PROVEN | Official changelog. Downstream typed clients and rich-text validators require review before claiming 10.5 compatibility. |
 | Historical “Get or create active session” SQL created a session | REJECTED | Previous reference only updated an existing row. Canonical `get_or_create_session()` now inserts when none exists. |
 | Canonical schema enforces bot scoping through RLS | VERIFIED_IN_CI when green | `schema/telegram_agent_router.sql` + `tests/runtime.sql` under a non-bypass role. |
 | Queue claim uses PostgreSQL `FOR UPDATE SKIP LOCKED` | VERIFIED_IN_CI when green | Canonical function + PostgreSQL 18 runtime test. |
