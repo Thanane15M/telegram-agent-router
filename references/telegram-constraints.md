@@ -1,6 +1,6 @@
 # Telegram constraints — current reference
 
-Last evidence review: **2026-11-15**. Reviewed upstream release: **Telegram Bot API 10.4 (2026-11-09)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
+Last evidence review: **2026-11-22**. Reviewed upstream release: **Telegram Bot API 10.5 (2026-11-22)**. Platform limits and capabilities are time-sensitive; verify the current Bot API, changelog and Bots FAQ before hard-coding them.
 
 ## Webhook delivery
 
@@ -35,6 +35,12 @@ Bot API **10.4 (2026-11-09)** allows an ephemeral callback reply to use `callbac
 ## Widget updates (10.4)
 
 Telegram added `widget_query` and `shared_widget_query` update types. Do not grant capabilities from widget-supplied content or wallet/card data: treat it as untrusted input and validate origin, permissions and transaction state independently. This repository has no verified widget handler.
+
+## Bot API 10.5 — bot settings, callback identity and API types
+
+The [official changelog](https://core.telegram.org/bots/api-changelog.md) dated **2026-11-22** adds `setMySettings` and an opt-in `callback_query_mode`: callbacks from buttons in bot-sent messages may include `inline_message_id` instead of `message`. A callback dispatcher must validate both shapes, bind the action to its authorized bot/chat/user context, and never assume `callback_query.message` exists. These paths are **NOT_PROVEN** in this repository; do not silently enable a settings mode or broaden bot/group/inline access.
+
+The `getMe` result is now `BotFullInfo` (not `User`), and expandable rich quotation blocks use `blocks` instead of `text`. If a consumer relies on concrete returned types or rich-text decoders, add official-shape fixture tests before switching. No Telegram 10.5 handler or deployed interoperability is claimed.
 
 ## Text size
 
