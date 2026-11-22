@@ -16,12 +16,13 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 VERSION_FILE = ROOT / "UPSTREAM_BOT_API_VERSION"
-CHANGELOG_URL = "https://core.telegram.org/bots/api-changelog"
+CHANGELOG_URL = "https://core.telegram.org/bots/api-changelog.md"
+CHANGELOG_BOT_TO_BOT_MARKER = "Added the ability to send messages to other bots via username"
 
 PAGES = {
     "api": (
         "https://core.telegram.org/bots/api",
-        ("sendMessageDraft", "4096", "retry_after", "bot-to-bot communication"),
+        ("sendMessageDraft", "4096", "retry_after"),
     ),
     "faq": (
         "https://core.telegram.org/bots/faq",
@@ -56,6 +57,8 @@ def main() -> int:
                 errors.append(f"{name}: marker missing from {url}: {marker}")
 
     changelog = fetch(CHANGELOG_URL)
+    if CHANGELOG_BOT_TO_BOT_MARKER.casefold() not in changelog.casefold():
+        errors.append(f"changelog: reviewed bot-to-bot capability marker missing from {CHANGELOG_URL}")
     current_version = parse_latest_bot_api_version(changelog)
     expected_version = reviewed_version()
     if current_version is None:
